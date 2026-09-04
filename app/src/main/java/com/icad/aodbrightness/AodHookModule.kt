@@ -35,13 +35,17 @@ class AodHookModule : XposedModule() {
         const val SETTING_MIN = "aod_brightness_min"
         const val SETTING_MAX = "aod_brightness_max"
         const val SETTING_CURVE = "aod_brightness_curve"
+        const val SETTING_LUX_MIN = "aod_brightness_lux_min"
+        const val SETTING_LUX_MAX = "aod_brightness_lux_max"
 
         @Volatile var isEnabled: Boolean = true
         @Volatile var isAdaptive: Boolean = false
         @Volatile var isPocketMode: Boolean = true
-        @Volatile var minBrightnessInt: Int = 30 // 1..255
-        @Volatile var maxBrightnessInt: Int = 100 // 1..255
+        @Volatile var minBrightnessInt: Int = 10 // 1..255
+        @Volatile var maxBrightnessInt: Int = 160 // 1..255
         @Volatile var curveGamma: Float = 1.3f // 0.5..2.5
+        @Volatile var minLuxCutoff: Float = 0f
+        @Volatile var maxLuxCutoff: Float = 20000f
         @Volatile var currentAmbientLux: Float = 0f
         @Volatile var isNear: Boolean = false
         @Volatile var inDoze: Boolean = false
@@ -98,12 +102,9 @@ class AodHookModule : XposedModule() {
             val lo = minBrightnessInt / 255.0f
             val hi = maxBrightnessInt / 255.0f
             return if (isAdaptive) {
-                // Smooth power curve across 0..10000 lux:
-                // - Pitch dark (0..50 lux): stays at pure min
-                // - Low/indoor light (500..900 lux): slightly brightens (~3-5% above min)
-                // - Window light (2000 lux): stays gentle (~12% above min)
-                // - Outdoor daylight (5000..10000 lux): ramps smoothly to max
-                val normalizedLux = (currentAmbientLux / 10000.0f).coerceIn(0.0f, 1.0f)
+                // Smooth power curve between minLuxCutoff and maxLuxCutoff:
+                val span = max(1.0f, maxLuxCutoff - minLuxCutoff)
+                val normalizedLux = ((currentAmbientLux - minLuxCutoff) / span).coerceIn(0.0f, 1.0f)
                 val factor = Math.pow(normalizedLux.toDouble(), curveGamma.toDouble()).toFloat()
                 (lo + (hi - lo) * factor).coerceIn(0.001f, 1.0f)
             } else {
@@ -234,10 +235,12 @@ class AodHookModule : XposedModule() {
                 isEnabled = Settings.System.getInt(cr, SETTING_ENABLED, 1) == 1
                 isAdaptive = Settings.System.getInt(cr, SETTING_ADAPTIVE, 0) == 1
                 isPocketMode = Settings.System.getInt(cr, SETTING_POCKET_MODE, 1) == 1
-                minBrightnessInt = Settings.System.getInt(cr, SETTING_MIN, 30)
-                maxBrightnessInt = Settings.System.getInt(cr, SETTING_MAX, 100)
+                minBrightnessInt = Settings.System.getInt(cr, SETTING_MIN, 10)
+                maxBrightnessInt = Settings.System.getInt(cr, SETTING_MAX, 160)
                 curveGamma = Settings.System.getFloat(cr, SETTING_CURVE, 1.3f)
-                Log.i(TAG, "Loaded settings: enabled=$isEnabled, adaptive=$isAdaptive, pocket=$isPocketMode, min=$minBrightnessInt, max=$maxBrightnessInt, curve=$curveGamma")
+                minLuxCutoff = Settings.System.getFloat(cr, SETTING_LUX_MIN, 0f)
+                maxLuxCutoff = Settings.System.getFloat(cr, SETTING_LUX_MAX, 20000f)
+                Log.i(TAG, "Loaded settings: enabled=$isEnabled, adaptive=$isAdaptive, pocket=$isPocketMode, min=$minBrightnessInt, max=$maxBrightnessInt, curve=$curveGamma, luxMin=$minLuxCutoff, luxMax=$maxLuxCutoff")
                 updateSensorRegistration()
             } catch (t: Throwable) {
                 Log.w(TAG, "loadSettings failed: ${t.message}")
@@ -273,7 +276,7 @@ class AodHookModule : XposedModule() {
             }
 
             val cr = context.contentResolver
-            for (key in listOf(SETTING_ENABLED, SETTING_ADAPTIVE, SETTING_POCKET_MODE, SETTING_MIN, SETTING_MAX, SETTING_CURVE)) {
+            for (key in listOf(SETTING_ENABLED, SETTING_ADAPTIVE, SETTING_POCKET_MODE, SETTING_MIN, SETTING_MAX, SETTING_CURVE, SETTING_LUX_MIN, SETTING_LUX_MAX)) {
                 try {
                     cr.registerContentObserver(Settings.System.getUriFor(key), false, observer)
                 } catch (t: Throwable) { }
@@ -289,7 +292,9 @@ class AodHookModule : XposedModule() {
                     minBrightnessInt = intent.getIntExtra(BrightnessProvider.KEY_MIN_BRIGHTNESS, minBrightnessInt)
                     maxBrightnessInt = intent.getIntExtra(BrightnessProvider.KEY_MAX_BRIGHTNESS, maxBrightnessInt)
                     curveGamma = intent.getFloatExtra(BrightnessProvider.KEY_CURVE, curveGamma)
-                    Log.d(TAG, "Broadcast received: min=$minBrightnessInt, max=$maxBrightnessInt, curve=$curveGamma, adaptive=$isAdaptive, pocket=$isPocketMode")
+                    minLuxCutoff = intent.getFloatExtra(BrightnessProvider.KEY_LUX_MIN, minLuxCutoff)
+                    maxLuxCutoff = intent.getFloatExtra(BrightnessProvider.KEY_LUX_MAX, maxLuxCutoff)
+                    Log.d(TAG, "Broadcast received: min=$minBrightnessInt, max=$maxBrightnessInt, curve=$curveGamma, adaptive=$isAdaptive, pocket=$isPocketMode, luxCutoff=[$minLuxCutoff..$maxLuxCutoff]")
                     updateSensorRegistration()
                     applyBrightness()
                 }

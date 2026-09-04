@@ -154,7 +154,7 @@
                             android:id="@+id/tvMinVal"
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
-                            android:text="1 / 255"
+                            android:text="10 / 255"
                             android:textColor="?attr/colorPrimary"
                             android:textStyle="bold" />
                     </LinearLayout>
@@ -174,7 +174,7 @@
                         android:valueFrom="1"
                         android:valueTo="255"
                         android:stepSize="1"
-                        android:value="30" />
+                        android:value="10" />
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
 
@@ -210,7 +210,7 @@
                             android:id="@+id/tvMaxVal"
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
-                            android:text="100 / 255"
+                            android:text="160 / 255"
                             android:textColor="?attr/colorPrimary"
                             android:textStyle="bold" />
                     </LinearLayout>
@@ -230,7 +230,7 @@
                         android:valueFrom="1"
                         android:valueTo="255"
                         android:stepSize="1"
-                        android:value="100" />
+                        android:value="160" />
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
 
@@ -287,6 +287,90 @@
                         android:valueTo="2.5"
                         android:stepSize="0.1"
                         android:value="1.3" />
+                </LinearLayout>
+            </com.google.android.material.card.MaterialCardView>
+
+            <!-- Lux Cutoffs Card -->
+            <com.google.android.material.card.MaterialCardView
+                android:id="@+id/cardLuxCutoff"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                app:cardCornerRadius="16dp"
+                app:cardElevation="2dp"
+                android:layout_marginBottom="16dp">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:padding="16dp">
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="Ambient Light (Lux) Cutoffs"
+                        android:textStyle="bold"
+                        android:textSize="16sp" />
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="4dp"
+                        android:layout_marginBottom="12dp"
+                        android:text="Below minimum cutoff stays at night brightness. Above maximum cutoff hits peak daylight brightness."
+                        android:textColor="?attr/colorOnSurfaceVariant"
+                        android:textSize="13sp" />
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="horizontal">
+
+                        <com.google.android.material.textfield.TextInputLayout
+                            android:id="@+id/tilMinLux"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:layout_marginEnd="8dp"
+                            android:hint="Min Lux"
+                            app:boxBackgroundMode="outline"
+                            app:suffixText="lux">
+
+                            <com.google.android.material.textfield.TextInputEditText
+                                android:id="@+id/etMinLux"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:inputType="number"
+                                android:text="0" />
+                        </com.google.android.material.textfield.TextInputLayout>
+
+                        <com.google.android.material.textfield.TextInputLayout
+                            android:id="@+id/tilMaxLux"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:layout_marginStart="8dp"
+                            android:hint="Max Lux"
+                            app:boxBackgroundMode="outline"
+                            app:suffixText="lux">
+
+                            <com.google.android.material.textfield.TextInputEditText
+                                android:id="@+id/etMaxLux"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:inputType="number"
+                                android:text="20000" />
+                        </com.google.android.material.textfield.TextInputLayout>
+                    </LinearLayout>
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnApplyLux"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_gravity="end"
+                        android:layout_marginTop="12dp"
+                        android:text="Apply Cutoffs"
+                        style="@style/Widget.Material3.Button.TonalButton" />
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
 

@@ -29,6 +29,10 @@ class MainActivity : AppCompatActivity() {
         val tvCurveVal = findViewById<TextView>(R.id.tvCurveVal)
         val cardMax = findViewById<MaterialCardView>(R.id.cardMax)
         val cardCurve = findViewById<MaterialCardView>(R.id.cardCurve)
+        val cardLuxCutoff = findViewById<MaterialCardView>(R.id.cardLuxCutoff)
+        val etMinLux = findViewById<com.google.android.material.textfield.TextInputEditText>(R.id.etMinLux)
+        val etMaxLux = findViewById<com.google.android.material.textfield.TextInputEditText>(R.id.etMaxLux)
+        val btnApplyLux = findViewById<MaterialButton>(R.id.btnApplyLux)
         val btnTestScreenOff = findViewById<MaterialButton>(R.id.btnTestScreenOff)
 
         // Ensure Android system AOD/Doze is enabled
@@ -58,15 +62,15 @@ class MainActivity : AppCompatActivity() {
         }
 
         val minBrightness = try {
-            android.provider.Settings.System.getInt(contentResolver, AodHookModule.SETTING_MIN, 30)
+            android.provider.Settings.System.getInt(contentResolver, AodHookModule.SETTING_MIN, 10)
         } catch (t: Throwable) {
-            prefs.getInt(BrightnessProvider.KEY_MIN_BRIGHTNESS, 30)
+            prefs.getInt(BrightnessProvider.KEY_MIN_BRIGHTNESS, 10)
         }
 
         val maxBrightness = try {
-            android.provider.Settings.System.getInt(contentResolver, AodHookModule.SETTING_MAX, 100)
+            android.provider.Settings.System.getInt(contentResolver, AodHookModule.SETTING_MAX, 160)
         } catch (t: Throwable) {
-            prefs.getInt(BrightnessProvider.KEY_MAX_BRIGHTNESS, 100)
+            prefs.getInt(BrightnessProvider.KEY_MAX_BRIGHTNESS, 160)
         }
 
         val curve = try {
@@ -75,20 +79,37 @@ class MainActivity : AppCompatActivity() {
             prefs.getFloat(BrightnessProvider.KEY_CURVE, 1.3f)
         }
 
+        val minLux = try {
+            android.provider.Settings.System.getFloat(contentResolver, AodHookModule.SETTING_LUX_MIN, 0f)
+        } catch (t: Throwable) {
+            prefs.getFloat(BrightnessProvider.KEY_LUX_MIN, 0f)
+        }
+
+        val maxLux = try {
+            android.provider.Settings.System.getFloat(contentResolver, AodHookModule.SETTING_LUX_MAX, 20000f)
+        } catch (t: Throwable) {
+            prefs.getFloat(BrightnessProvider.KEY_LUX_MAX, 20000f)
+        }
+
         switchEnable.isChecked = enabled
         switchAdaptive.isChecked = adaptive
         switchPocketMode.isChecked = pocketMode
         sliderMin.value = minBrightness.coerceIn(1, 255).toFloat()
         sliderMax.value = maxBrightness.coerceIn(1, 255).toFloat()
         sliderCurve.value = curve.coerceIn(0.5f, 2.5f)
+        etMinLux.setText(if (minLux % 1f == 0f) minLux.toInt().toString() else minLux.toString())
+        etMaxLux.setText(if (maxLux % 1f == 0f) maxLux.toInt().toString() else maxLux.toString())
 
         tvMinVal.text = "$minBrightness / 255 (${(minBrightness * 100 / 255)}%)"
         tvMaxVal.text = "$maxBrightness / 255 (${(maxBrightness * 100 / 255)}%)"
         tvCurveVal.text = String.format(java.util.Locale.US, "%.1fx", curve)
         cardMax.visibility = if (adaptive) View.VISIBLE else View.GONE
         cardCurve.visibility = if (adaptive) View.VISIBLE else View.GONE
+        cardLuxCutoff.visibility = if (adaptive) View.VISIBLE else View.GONE
 
         fun broadcastCurrentSettings() {
+            val curMinLux = etMinLux.text?.toString()?.toFloatOrNull() ?: 0f
+            val curMaxLux = etMaxLux.text?.toString()?.toFloatOrNull() ?: 20000f
             val intent = Intent(AodHookModule.ACTION_UPDATE_SETTINGS).apply {
                 setPackage("com.android.systemui")
                 putExtra(BrightnessProvider.KEY_ENABLED, switchEnable.isChecked)
@@ -97,6 +118,8 @@ class MainActivity : AppCompatActivity() {
                 putExtra(BrightnessProvider.KEY_MIN_BRIGHTNESS, sliderMin.value.toInt())
                 putExtra(BrightnessProvider.KEY_MAX_BRIGHTNESS, sliderMax.value.toInt())
                 putExtra(BrightnessProvider.KEY_CURVE, sliderCurve.value)
+                putExtra(BrightnessProvider.KEY_LUX_MIN, curMinLux)
+                putExtra(BrightnessProvider.KEY_LUX_MAX, curMaxLux)
             }
             sendBroadcast(intent)
         }
@@ -128,6 +151,8 @@ class MainActivity : AppCompatActivity() {
                     BrightnessProvider.KEY_MIN_BRIGHTNESS -> android.provider.Settings.System.putInt(contentResolver, AodHookModule.SETTING_MIN, value as Int)
                     BrightnessProvider.KEY_MAX_BRIGHTNESS -> android.provider.Settings.System.putInt(contentResolver, AodHookModule.SETTING_MAX, value as Int)
                     BrightnessProvider.KEY_CURVE -> android.provider.Settings.System.putFloat(contentResolver, AodHookModule.SETTING_CURVE, value as Float)
+                    BrightnessProvider.KEY_LUX_MIN -> android.provider.Settings.System.putFloat(contentResolver, AodHookModule.SETTING_LUX_MIN, value as Float)
+                    BrightnessProvider.KEY_LUX_MAX -> android.provider.Settings.System.putFloat(contentResolver, AodHookModule.SETTING_LUX_MAX, value as Float)
                 }
             } catch (t: Throwable) { }
 
@@ -135,6 +160,20 @@ class MainActivity : AppCompatActivity() {
                 contentResolver.update(BrightnessProvider.CONTENT_URI, cv, null, null)
             } catch (t: Throwable) { }
             broadcastCurrentSettings()
+        }
+
+        fun applyLuxCutoffs() {
+            val minL = etMinLux.text?.toString()?.toFloatOrNull() ?: 0f
+            val maxL = etMaxLux.text?.toString()?.toFloatOrNull() ?: 20000f
+            val safeMin = kotlin.math.max(0f, minL)
+            val safeMax = kotlin.math.max(safeMin + 1f, maxL)
+            updateSetting(BrightnessProvider.KEY_LUX_MIN, safeMin)
+            updateSetting(BrightnessProvider.KEY_LUX_MAX, safeMax)
+            android.widget.Toast.makeText(this, "Cutoffs applied: ${safeMin.toInt()} - ${safeMax.toInt()} lux", android.widget.Toast.LENGTH_SHORT).show()
+        }
+
+        btnApplyLux.setOnClickListener {
+            applyLuxCutoffs()
         }
 
         switchEnable.setOnCheckedChangeListener { _, isChecked ->
@@ -145,6 +184,7 @@ class MainActivity : AppCompatActivity() {
             val v = if (isChecked) View.VISIBLE else View.GONE
             cardMax.visibility = v
             cardCurve.visibility = v
+            cardLuxCutoff.visibility = v
             updateSetting(BrightnessProvider.KEY_ADAPTIVE, isChecked)
         }
 
@@ -181,6 +221,20 @@ class MainActivity : AppCompatActivity() {
             }, 500)
         }
 
-        broadcastCurrentSettings()
+        etMaxLux.setOnEditorActionListener { _, actionId, _ ->
+            if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_DONE) {
+                applyLuxCutoffs()
+                true
+            } else {
+                false
+            }
+        }
+
+        if (android.provider.Settings.System.getString(contentResolver, AodHookModule.SETTING_LUX_MIN) == null) {
+            updateSetting(BrightnessProvider.KEY_LUX_MIN, minLux)
+            updateSetting(BrightnessProvider.KEY_LUX_MAX, maxLux)
+        } else {
+            broadcastCurrentSettings()
+        }
     }
 }

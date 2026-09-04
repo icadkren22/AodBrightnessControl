@@ -22,6 +22,8 @@ class BrightnessProvider : ContentProvider() {
         const val KEY_MIN_BRIGHTNESS = "min_brightness"
         const val KEY_MAX_BRIGHTNESS = "max_brightness"
         const val KEY_CURVE = "curve"
+        const val KEY_LUX_MIN = "lux_min"
+        const val KEY_LUX_MAX = "lux_max"
 
         const val METHOD_GET_SETTINGS = "get_settings"
     }
@@ -39,8 +41,11 @@ class BrightnessProvider : ContentProvider() {
                 putBoolean(KEY_ENABLED, prefs.getBoolean(KEY_ENABLED, true))
                 putBoolean(KEY_ADAPTIVE, prefs.getBoolean(KEY_ADAPTIVE, true))
                 putBoolean(KEY_POCKET_MODE, prefs.getBoolean(KEY_POCKET_MODE, true))
-                putInt(KEY_MIN_BRIGHTNESS, prefs.getInt(KEY_MIN_BRIGHTNESS, 1))
-                putInt(KEY_MAX_BRIGHTNESS, prefs.getInt(KEY_MAX_BRIGHTNESS, 40))
+                putInt(KEY_MIN_BRIGHTNESS, prefs.getInt(KEY_MIN_BRIGHTNESS, 10))
+                putInt(KEY_MAX_BRIGHTNESS, prefs.getInt(KEY_MAX_BRIGHTNESS, 160))
+                putFloat(KEY_CURVE, prefs.getFloat(KEY_CURVE, 1.3f))
+                putFloat(KEY_LUX_MIN, prefs.getFloat(KEY_LUX_MIN, 0f))
+                putFloat(KEY_LUX_MAX, prefs.getFloat(KEY_LUX_MAX, 20000f))
             }
         }
         return super.call(method, arg, extras)
@@ -55,8 +60,11 @@ class BrightnessProvider : ContentProvider() {
         cursor.addRow(arrayOf(KEY_ENABLED, if (prefs.getBoolean(KEY_ENABLED, true)) 1 else 0))
         cursor.addRow(arrayOf(KEY_ADAPTIVE, if (prefs.getBoolean(KEY_ADAPTIVE, true)) 1 else 0))
         cursor.addRow(arrayOf(KEY_POCKET_MODE, if (prefs.getBoolean(KEY_POCKET_MODE, true)) 1 else 0))
-        cursor.addRow(arrayOf(KEY_MIN_BRIGHTNESS, prefs.getInt(KEY_MIN_BRIGHTNESS, 1)))
-        cursor.addRow(arrayOf(KEY_MAX_BRIGHTNESS, prefs.getInt(KEY_MAX_BRIGHTNESS, 40)))
+        cursor.addRow(arrayOf(KEY_MIN_BRIGHTNESS, prefs.getInt(KEY_MIN_BRIGHTNESS, 10)))
+        cursor.addRow(arrayOf(KEY_MAX_BRIGHTNESS, prefs.getInt(KEY_MAX_BRIGHTNESS, 160)))
+        cursor.addRow(arrayOf(KEY_CURVE, prefs.getFloat(KEY_CURVE, 1.3f)))
+        cursor.addRow(arrayOf(KEY_LUX_MIN, prefs.getFloat(KEY_LUX_MIN, 0f)))
+        cursor.addRow(arrayOf(KEY_LUX_MAX, prefs.getFloat(KEY_LUX_MAX, 20000f)))
         return cursor
     }
 
@@ -80,6 +88,15 @@ class BrightnessProvider : ContentProvider() {
             }
             if (values.containsKey(KEY_MAX_BRIGHTNESS)) {
                 editor.putInt(KEY_MAX_BRIGHTNESS, values.getAsInteger(KEY_MAX_BRIGHTNESS))
+            }
+            if (values.containsKey(KEY_CURVE)) {
+                editor.putFloat(KEY_CURVE, values.getAsFloat(KEY_CURVE))
+            }
+            if (values.containsKey(KEY_LUX_MIN)) {
+                editor.putFloat(KEY_LUX_MIN, values.getAsFloat(KEY_LUX_MIN))
+            }
+            if (values.containsKey(KEY_LUX_MAX)) {
+                editor.putFloat(KEY_LUX_MAX, values.getAsFloat(KEY_LUX_MAX))
             }
             editor.apply()
             context?.contentResolver?.notifyChange(uri, null)
