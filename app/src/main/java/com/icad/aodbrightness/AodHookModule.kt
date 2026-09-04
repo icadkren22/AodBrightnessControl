@@ -5,6 +5,15 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.database.ContentObserver
+import android.graphics.Bitmap
+import android.graphics.BitmapShader
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.PorterDuff
+import android.graphics.PorterDuffXfermode
+import android.graphics.Shader
+import android.graphics.drawable.Drawable
 import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
@@ -49,6 +58,53 @@ class AodHookModule : XposedModule() {
         @Volatile var currentAmbientLux: Float = 0f
         @Volatile var isNear: Boolean = false
         @Volatile var inDoze: Boolean = false
+
+        const val KEY_BLUR_MODE = "blur_mode"
+        @Volatile var isAcrylicBlur: Boolean = false
+
+        fun checkAcrylicBlur() {
+            try {
+                val prop = Class.forName("android.os.SystemProperties")
+                    .getMethod("get", String::class.java, String::class.java)
+                    .invoke(null, "persist.sys.phh.sf.background_blur", "disabled") as? String
+                isAcrylicBlur = (prop == "acrylic")
+                Log.d(TAG, "checkAcrylicBlur: prop=$prop, isAcrylicBlur=$isAcrylicBlur")
+            } catch (t: Throwable) {
+                Log.w(TAG, "checkAcrylicBlur failed: ${t.message}")
+            }
+        }
+
+        object FrostedGlassEffect {
+            private var noisePaint: Paint? = null
+            private var tintPaint: Paint? = null
+
+            fun getTintPaint(): Paint {
+                tintPaint?.let { return it }
+                return Paint().apply {
+                    color = Color.parseColor("#99121418") // Translucent dark charcoal/slate
+                    isAntiAlias = true
+                }.also { tintPaint = it }
+            }
+
+            fun getNoisePaint(): Paint {
+                noisePaint?.let { return it }
+                val size = 64
+                val bmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+                val rnd = java.util.Random(1337)
+                for (y in 0 until size) {
+                    for (x in 0 until size) {
+                        // Subtle frosted grain
+                        val v = 15 + rnd.nextInt(35)
+                        bmp.setPixel(x, y, Color.argb(v, 255, 255, 255))
+                    }
+                }
+                val shader = BitmapShader(bmp, Shader.TileMode.REPEAT, Shader.TileMode.REPEAT)
+                return Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply {
+                    this.shader = shader
+                    xfermode = PorterDuffXfermode(PorterDuff.Mode.SRC_OVER)
+                }.also { noisePaint = it }
+            }
+        }
 
         @Volatile private var activeInstance: WeakReference<Any>? = null
         @Volatile private var cachedSetDozeMethod: Method? = null
@@ -240,7 +296,8 @@ class AodHookModule : XposedModule() {
                 curveGamma = Settings.System.getFloat(cr, SETTING_CURVE, 1.3f)
                 minLuxCutoff = Settings.System.getFloat(cr, SETTING_LUX_MIN, 0f)
                 maxLuxCutoff = Settings.System.getFloat(cr, SETTING_LUX_MAX, 20000f)
-                Log.i(TAG, "Loaded settings: enabled=$isEnabled, adaptive=$isAdaptive, pocket=$isPocketMode, min=$minBrightnessInt, max=$maxBrightnessInt, curve=$curveGamma, luxMin=$minLuxCutoff, luxMax=$maxLuxCutoff")
+                checkAcrylicBlur()
+                Log.i(TAG, "Loaded settings: enabled=$isEnabled, adaptive=$isAdaptive, pocket=$isPocketMode, min=$minBrightnessInt, max=$maxBrightnessInt, curve=$curveGamma, luxMin=$minLuxCutoff, luxMax=$maxLuxCutoff, acrylic=$isAcrylicBlur")
                 updateSensorRegistration()
             } catch (t: Throwable) {
                 Log.w(TAG, "loadSettings failed: ${t.message}")
@@ -294,7 +351,13 @@ class AodHookModule : XposedModule() {
                     curveGamma = intent.getFloatExtra(BrightnessProvider.KEY_CURVE, curveGamma)
                     minLuxCutoff = intent.getFloatExtra(BrightnessProvider.KEY_LUX_MIN, minLuxCutoff)
                     maxLuxCutoff = intent.getFloatExtra(BrightnessProvider.KEY_LUX_MAX, maxLuxCutoff)
-                    Log.d(TAG, "Broadcast received: min=$minBrightnessInt, max=$maxBrightnessInt, curve=$curveGamma, adaptive=$isAdaptive, pocket=$isPocketMode, luxCutoff=[$minLuxCutoff..$maxLuxCutoff]")
+                    if (intent.hasExtra(KEY_BLUR_MODE)) {
+                        val mode = intent.getStringExtra(KEY_BLUR_MODE)
+                        isAcrylicBlur = (mode == "acrylic")
+                    } else {
+                        checkAcrylicBlur()
+                    }
+                    Log.d(TAG, "Broadcast received: min=$minBrightnessInt, max=$maxBrightnessInt, curve=$curveGamma, adaptive=$isAdaptive, pocket=$isPocketMode, luxCutoff=[$minLuxCutoff..$maxLuxCutoff], acrylic=$isAcrylicBlur")
                     updateSensorRegistration()
                     applyBrightness()
                 }
@@ -323,15 +386,16 @@ class AodHookModule : XposedModule() {
 
     override fun onPackageLoaded(param: PackageLoadedParam) {
         super.onPackageLoaded(param)
-        if (param.packageName == "com.android.systemui") {
-            hookSystemUI(param.defaultClassLoader)
-        }
+        Log.d(TAG, "onPackageLoaded: pkg=${param.packageName}")
     }
 
     override fun onPackageReady(param: PackageReadyParam) {
         super.onPackageReady(param)
+        Log.i(TAG, "onPackageReady: pkg=${param.packageName}")
         if (param.packageName == "com.android.systemui") {
             hookSystemUI(param.classLoader)
+        } else if (param.packageName == "me.phh.treble.app") {
+            hookTrebleApp(param.classLoader)
         }
     }
 
@@ -422,10 +486,81 @@ class AodHookModule : XposedModule() {
                 Log.i(TAG, "Hooked onSensorChanged")
             }
 
+            // 5. ScrimDrawable.draw - inject Frosted Glass / Acrylic effect
+            try {
+                val scrimClass = classLoader.loadClass("com.android.systemui.scrim.ScrimDrawable")
+                scrimClass.declaredMethods.firstOrNull { it.name == "draw" && it.parameterTypes.size == 1 }?.let { m ->
+                    hook(m).intercept { chain ->
+                        chain.proceed()
+                        if (isAcrylicBlur) {
+                            val drawable = chain.thisObject as? Drawable ?: return@intercept null
+                            val canvas = chain.args[0] as? Canvas ?: return@intercept null
+                            val alpha = drawable.alpha
+                            if (alpha > 5) {
+                                val bounds = drawable.bounds
+                                val tint = FrostedGlassEffect.getTintPaint()
+                                tint.alpha = (alpha * 0.45f).toInt().coerceIn(0, 255)
+                                canvas.drawRect(bounds, tint)
+
+                                val noise = FrostedGlassEffect.getNoisePaint()
+                                noise.alpha = (alpha * 0.75f).toInt().coerceIn(0, 255)
+                                canvas.drawRect(bounds, noise)
+                            }
+                        }
+                        null
+                    }
+                    Log.i(TAG, "Hooked ScrimDrawable.draw for Frosted Glass Acrylic")
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "Could not hook ScrimDrawable: ${t.message}")
+            }
+
             systemUiHooked = true
             Log.i(TAG, "Successfully installed all SystemUI hooks!")
         } catch (t: Throwable) {
             Log.e(TAG, "Error hooking SystemUI: ${t.message}", t)
+        }
+    }
+
+    private var trebleAppHooked = false
+
+    private fun hookTrebleApp(classLoader: ClassLoader) {
+        if (trebleAppHooked) return
+        try {
+            val fragClass = classLoader.loadClass("me.phh.treble.app.MiscSettingsFragment")
+            fragClass.declaredMethods.firstOrNull { it.name == "onCreatePreferences" }?.let { m ->
+                hook(m).intercept { chain ->
+                    chain.proceed()
+                    val frag = chain.thisObject
+                    try {
+                        val findPref = frag.javaClass.getMethod("findPreference", CharSequence::class.java)
+                        val pref = findPref.invoke(frag, "key_display_sf_blur_algorithm") ?: return@intercept null
+
+                        val getEntries = pref.javaClass.getMethod("getEntries")
+                        val setEntries = pref.javaClass.getMethod("setEntries", Array<CharSequence>::class.java)
+                        val getValues = pref.javaClass.getMethod("getEntryValues")
+                        val setValues = pref.javaClass.getMethod("setEntryValues", Array<CharSequence>::class.java)
+
+                        val entries = (getEntries.invoke(pref) as? Array<*>)?.map { it.toString() as CharSequence }?.toMutableList() ?: mutableListOf()
+                        val values = (getValues.invoke(pref) as? Array<*>)?.map { it.toString() as CharSequence }?.toMutableList() ?: mutableListOf()
+
+                        if (!values.any { it.toString() == "acrylic" }) {
+                            entries.add("Frosted Glass / Acrylic (Ultra-Light)")
+                            values.add("acrylic")
+                            setEntries.invoke(pref, entries.toTypedArray())
+                            setValues.invoke(pref, values.toTypedArray())
+                            Log.i(TAG, "Injected 'Frosted Glass / Acrylic' into TrebleApp!")
+                        }
+                    } catch (t: Throwable) {
+                        Log.e(TAG, "Error injecting into TrebleApp: ${t.message}", t)
+                    }
+                    null
+                }
+                trebleAppHooked = true
+                Log.i(TAG, "Hooked MiscSettingsFragment in TrebleApp")
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "Could not hook TrebleApp: ${t.message}")
         }
     }
 }

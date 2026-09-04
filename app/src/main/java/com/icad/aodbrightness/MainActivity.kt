@@ -33,6 +33,7 @@ class MainActivity : AppCompatActivity() {
         val etMinLux = findViewById<com.google.android.material.textfield.TextInputEditText>(R.id.etMinLux)
         val etMaxLux = findViewById<com.google.android.material.textfield.TextInputEditText>(R.id.etMaxLux)
         val btnApplyLux = findViewById<MaterialButton>(R.id.btnApplyLux)
+        val switchAcrylicBlur = findViewById<MaterialSwitch>(R.id.switchAcrylicBlur)
         val btnTestScreenOff = findViewById<MaterialButton>(R.id.btnTestScreenOff)
 
         // Ensure Android system AOD/Doze is enabled
@@ -107,6 +108,16 @@ class MainActivity : AppCompatActivity() {
         cardCurve.visibility = if (adaptive) View.VISIBLE else View.GONE
         cardLuxCutoff.visibility = if (adaptive) View.VISIBLE else View.GONE
 
+        val acrylicBlur = try {
+            val prop = Class.forName("android.os.SystemProperties")
+                .getMethod("get", String::class.java, String::class.java)
+                .invoke(null, "persist.sys.phh.sf.background_blur", "disabled") as? String
+            prop == "acrylic"
+        } catch (t: Throwable) {
+            prefs.getBoolean("acrylic_blur", false)
+        }
+        switchAcrylicBlur.isChecked = acrylicBlur
+
         fun broadcastCurrentSettings() {
             val curMinLux = etMinLux.text?.toString()?.toFloatOrNull() ?: 0f
             val curMaxLux = etMaxLux.text?.toString()?.toFloatOrNull() ?: 20000f
@@ -120,6 +131,7 @@ class MainActivity : AppCompatActivity() {
                 putExtra(BrightnessProvider.KEY_CURVE, sliderCurve.value)
                 putExtra(BrightnessProvider.KEY_LUX_MIN, curMinLux)
                 putExtra(BrightnessProvider.KEY_LUX_MAX, curMaxLux)
+                putExtra(AodHookModule.KEY_BLUR_MODE, if (switchAcrylicBlur.isChecked) "acrylic" else "disabled")
             }
             sendBroadcast(intent)
         }
@@ -228,6 +240,21 @@ class MainActivity : AppCompatActivity() {
             } else {
                 false
             }
+        }
+
+        switchAcrylicBlur.setOnCheckedChangeListener { _, isChecked ->
+            val mode = if (isChecked) "acrylic" else "disabled"
+            prefs.edit().putBoolean("acrylic_blur", isChecked).apply()
+            try {
+                Class.forName("android.os.SystemProperties")
+                    .getMethod("set", String::class.java, String::class.java)
+                    .invoke(null, "persist.sys.phh.sf.background_blur", mode)
+            } catch (t: Throwable) {
+                try {
+                    Runtime.getRuntime().exec(arrayOf("su", "-c", "setprop persist.sys.phh.sf.background_blur $mode"))
+                } catch (t2: Throwable) { }
+            }
+            broadcastCurrentSettings()
         }
 
         if (android.provider.Settings.System.getString(contentResolver, AodHookModule.SETTING_LUX_MIN) == null) {
