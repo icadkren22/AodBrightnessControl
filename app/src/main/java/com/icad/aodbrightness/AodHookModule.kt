@@ -1,0 +1,338 @@
+package com.icad.aodbrightness
+
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.database.ContentObserver
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
+import android.os.Build
+import android.os.Handler
+import android.os.Looper
+import android.provider.Settings
+import android.util.Log
+import io.github.libxposed.api.XposedModule
+import io.github.libxposed.api.XposedModuleInterface.PackageLoadedParam
+import io.github.libxposed.api.XposedModuleInterface.PackageReadyParam
+import java.lang.ref.WeakReference
+import java.lang.reflect.Method
+import kotlin.math.abs
+import kotlin.math.max
+import kotlin.math.min
+
+class AodHookModule : XposedModule() {
+
+    companion object {
+        private const val TAG = "AodBrightnessHook"
+        const val ACTION_UPDATE_SETTINGS = "com.icad.aodbrightness.UPDATE_SETTINGS"
+
+        const val SETTING_ENABLED = "aod_brightness_enabled"
+        const val SETTING_ADAPTIVE = "aod_brightness_adaptive"
+        const val SETTING_MIN = "aod_brightness_min"
+        const val SETTING_MAX = "aod_brightness_max"
+        const val SETTING_CURVE = "aod_brightness_curve"
+
+        @Volatile var isEnabled: Boolean = true
+        @Volatile var isAdaptive: Boolean = false
+        @Volatile var minBrightnessInt: Int = 30 // 1..255
+        @Volatile var maxBrightnessInt: Int = 100 // 1..255
+        @Volatile var curveGamma: Float = 1.3f // 0.5..2.5
+        @Volatile var currentAmbientLux: Float = 0f
+
+        @Volatile private var activeInstance: WeakReference<Any>? = null
+        @Volatile private var cachedSetDozeMethod: Method? = null
+        @Volatile private var observerRegistered: Boolean = false
+        @Volatile private var lightSensorRegistered: Boolean = false
+        @Volatile private var sensorManager: SensorManager? = null
+        @Volatile private var lightSensor: Sensor? = null
+
+        private val lightSensorListener = object : SensorEventListener {
+            override fun onSensorChanged(event: SensorEvent?) {
+                if (event == null || event.values.isEmpty()) return
+                val lux = event.values[0]
+                // Only update if change is significant (> 1 lux or > 5% difference)
+                if (abs(lux - currentAmbientLux) >= 1f) {
+                    currentAmbientLux = lux
+                    Log.d(TAG, "Light sensor event: lux=$lux")
+                    if (isEnabled && isAdaptive) {
+                        applyBrightness()
+                    }
+                }
+            }
+
+            override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+        }
+
+        fun targetBrightness(): Float {
+            val lo = minBrightnessInt / 255.0f
+            val hi = maxBrightnessInt / 255.0f
+            return if (isAdaptive) {
+                // Smooth power curve (gamma 1.3) across 0..10000 lux:
+                // - Pitch dark (0..50 lux): stays at pure min
+                // - Low/indoor light (500..900 lux): slightly brightens (~3-5% above min)
+                // - Window light (2000 lux): stays gentle (~12% above min)
+                // - Outdoor daylight (5000..10000 lux): ramps smoothly to max
+                val normalizedLux = (currentAmbientLux / 10000.0f).coerceIn(0.0f, 1.0f)
+                val factor = Math.pow(normalizedLux.toDouble(), curveGamma.toDouble()).toFloat()
+                (lo + (hi - lo) * factor).coerceIn(0.001f, 1.0f)
+            } else {
+                lo.coerceIn(0.001f, 1.0f)
+            }
+        }
+
+        fun patchInstance(obj: Any) {
+            val t = targetBrightness()
+            runCatching {
+                val defField = obj.javaClass.getDeclaredField("mDefaultDozeBrightness").apply { isAccessible = true }
+                defField.setFloat(obj, t)
+            }
+            runCatching {
+                val arr = obj.javaClass.getDeclaredField("mSensorToBrightness").apply { isAccessible = true }.get(obj) as? FloatArray
+                arr?.fill(t)
+            }
+            for (field in listOf("mSensorToScrimOpacity", "mSensorToWallpaperScrimOpacity")) {
+                runCatching {
+                    val arr = obj.javaClass.getDeclaredField(field).apply { isAccessible = true }.get(obj) as? IntArray
+                    arr?.fill(0)
+                }
+            }
+        }
+
+        fun pushToDozeService(obj: Any) {
+            val t = targetBrightness()
+            try {
+                val srvField = obj.javaClass.getDeclaredField("mDozeService").apply { isAccessible = true }
+                val srv = srvField.get(obj) ?: return
+
+                var method = cachedSetDozeMethod
+                if (method == null) {
+                    method = (srv.javaClass.methods + srv.javaClass.declaredMethods)
+                        .firstOrNull { it.name == "setDozeScreenBrightness" && it.parameterTypes.size == 1 }
+                        ?.also { it.isAccessible = true }
+                    cachedSetDozeMethod = method
+                }
+                method?.invoke(srv, t)
+            } catch (t: Throwable) {
+                Log.w(TAG, "pushToDozeService failed: ${t.message}")
+            }
+        }
+
+        fun applyBrightness(obj: Any? = null) {
+            val instance = obj ?: activeInstance?.get() ?: return
+            if (!isEnabled) return
+            patchInstance(instance)
+            pushToDozeService(instance)
+            Log.d(TAG, "applyBrightness: target=${targetBrightness()}, min=$minBrightnessInt, max=$maxBrightnessInt, lux=$currentAmbientLux")
+        }
+
+        fun updateSensorRegistration() {
+            val sm = sensorManager ?: return
+            val sensor = lightSensor ?: return
+
+            if (isEnabled && isAdaptive) {
+                if (!lightSensorRegistered) {
+                    val success = sm.registerListener(lightSensorListener, sensor, SensorManager.SENSOR_DELAY_NORMAL)
+                    lightSensorRegistered = success
+                    Log.i(TAG, "Registered light sensor listener: success=$success")
+                }
+            } else {
+                if (lightSensorRegistered) {
+                    sm.unregisterListener(lightSensorListener)
+                    lightSensorRegistered = false
+                    Log.i(TAG, "Unregistered light sensor listener")
+                }
+            }
+        }
+
+        fun loadSettings(context: Context) {
+            try {
+                val cr = context.contentResolver
+                isEnabled = Settings.System.getInt(cr, SETTING_ENABLED, 1) == 1
+                isAdaptive = Settings.System.getInt(cr, SETTING_ADAPTIVE, 0) == 1
+                minBrightnessInt = Settings.System.getInt(cr, SETTING_MIN, 30)
+                maxBrightnessInt = Settings.System.getInt(cr, SETTING_MAX, 100)
+                curveGamma = Settings.System.getFloat(cr, SETTING_CURVE, 1.3f)
+                Log.i(TAG, "Loaded settings: enabled=$isEnabled, adaptive=$isAdaptive, min=$minBrightnessInt, max=$maxBrightnessInt, curve=$curveGamma")
+                updateSensorRegistration()
+            } catch (t: Throwable) {
+                Log.w(TAG, "loadSettings failed: ${t.message}")
+            }
+        }
+
+        fun setupObserver(context: Context) {
+            if (observerRegistered) return
+            observerRegistered = true
+
+            // Initialize SensorManager
+            try {
+                val sm = context.getSystemService(Context.SENSOR_SERVICE) as? SensorManager
+                sensorManager = sm
+                lightSensor = sm?.getDefaultSensor(Sensor.TYPE_LIGHT)
+                Log.i(TAG, "Light sensor init: sensor=${lightSensor?.name}")
+            } catch (t: Throwable) {
+                Log.e(TAG, "Failed initializing SensorManager: ${t.message}")
+            }
+
+            val handler = Handler(Looper.getMainLooper())
+            val reloadRunnable = Runnable {
+                loadSettings(context)
+                applyBrightness()
+            }
+
+            val observer = object : ContentObserver(handler) {
+                override fun onChange(selfChange: Boolean) {
+                    handler.removeCallbacks(reloadRunnable)
+                    handler.postDelayed(reloadRunnable, 300)
+                }
+            }
+
+            val cr = context.contentResolver
+            for (key in listOf(SETTING_ENABLED, SETTING_ADAPTIVE, SETTING_MIN, SETTING_MAX, SETTING_CURVE)) {
+                try {
+                    cr.registerContentObserver(Settings.System.getUriFor(key), false, observer)
+                } catch (t: Throwable) { }
+            }
+
+            val filter = IntentFilter(ACTION_UPDATE_SETTINGS)
+            val receiver = object : BroadcastReceiver() {
+                override fun onReceive(c: Context?, intent: Intent?) {
+                    if (intent == null) return
+                    isEnabled = intent.getBooleanExtra(BrightnessProvider.KEY_ENABLED, isEnabled)
+                    isAdaptive = intent.getBooleanExtra(BrightnessProvider.KEY_ADAPTIVE, isAdaptive)
+                    minBrightnessInt = intent.getIntExtra(BrightnessProvider.KEY_MIN_BRIGHTNESS, minBrightnessInt)
+                    maxBrightnessInt = intent.getIntExtra(BrightnessProvider.KEY_MAX_BRIGHTNESS, maxBrightnessInt)
+                    curveGamma = intent.getFloatExtra(BrightnessProvider.KEY_CURVE, curveGamma)
+                    Log.d(TAG, "Broadcast received: min=$minBrightnessInt, max=$maxBrightnessInt, curve=$curveGamma, adaptive=$isAdaptive")
+                    updateSensorRegistration()
+                    applyBrightness()
+                }
+            }
+
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    context.registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED)
+                } else {
+                    context.registerReceiver(receiver, filter)
+                }
+                Log.i(TAG, "Successfully registered ContentObserver and BroadcastReceiver in SystemUI")
+            } catch (t: Throwable) {
+                Log.e(TAG, "Error registering receiver: ${t.message}", t)
+            }
+
+            updateSensorRegistration()
+        }
+
+        fun appContext(): Context? = runCatching {
+            Class.forName("android.app.ActivityThread")
+                .getMethod("currentApplication")
+                .invoke(null) as? Context
+        }.getOrNull()
+    }
+
+    override fun onPackageLoaded(param: PackageLoadedParam) {
+        super.onPackageLoaded(param)
+        if (param.packageName == "com.android.systemui") {
+            hookSystemUI(param.defaultClassLoader)
+        }
+    }
+
+    override fun onPackageReady(param: PackageReadyParam) {
+        super.onPackageReady(param)
+        if (param.packageName == "com.android.systemui") {
+            hookSystemUI(param.classLoader)
+        }
+    }
+
+    private var systemUiHooked = false
+
+    private fun hookSystemUI(classLoader: ClassLoader) {
+        if (systemUiHooked) return
+        try {
+            val clazz = classLoader.loadClass("com.android.systemui.doze.DozeScreenBrightness")
+            Log.i(TAG, "Found DozeScreenBrightness class in SystemUI")
+
+            appContext()?.let {
+                loadSettings(it)
+                setupObserver(it)
+            }
+
+            // 1. transitionTo - manage active instance and sensor lifecycle
+            clazz.declaredMethods.firstOrNull { it.name == "transitionTo" }?.let { m ->
+                hook(m).intercept { chain ->
+                    val obj = chain.thisObject
+                    activeInstance = WeakReference(obj)
+                    appContext()?.let { setupObserver(it) }
+
+                    val newState = chain.args[1]?.toString() ?: ""
+                    Log.d(TAG, "transitionTo state: $newState")
+
+                    if (newState == "FINISH") {
+                        // Turned screen back on / left doze
+                        if (lightSensorRegistered) {
+                            sensorManager?.unregisterListener(lightSensorListener)
+                            lightSensorRegistered = false
+                            Log.d(TAG, "Unregistered light sensor on FINISH")
+                        }
+                    } else if (newState.contains("DOZE")) {
+                        updateSensorRegistration()
+                    }
+
+                    patchInstance(obj)
+                    chain.proceed()
+                }
+                Log.i(TAG, "Hooked transitionTo")
+            }
+
+            // 2. resetBrightnessToDefault - set target brightness directly
+            clazz.declaredMethods.firstOrNull { it.name == "resetBrightnessToDefault" }?.let { m ->
+                hook(m).intercept { chain ->
+                    val obj = chain.thisObject
+                    activeInstance = WeakReference(obj)
+                    if (isEnabled) {
+                        patchInstance(obj)
+                        pushToDozeService(obj)
+                        Log.d(TAG, "resetBrightnessToDefault applied target: ${targetBrightness()}")
+                        null
+                    } else {
+                        chain.proceed()
+                    }
+                }
+                Log.i(TAG, "Hooked resetBrightnessToDefault")
+            }
+
+            // 3. clampToDimBrightnessForScreenOff - override screen-off clamp with our target
+            clazz.declaredMethods.firstOrNull { it.name == "clampToDimBrightnessForScreenOff" }?.let { m ->
+                hook(m).intercept { chain ->
+                    if (isEnabled) targetBrightness() else chain.proceed()
+                }
+                Log.i(TAG, "Hooked clampToDimBrightnessForScreenOff")
+            }
+
+            // 4. onSensorChanged (original method backup hook, if SystemUI ever fires it)
+            clazz.declaredMethods.firstOrNull { it.name == "onSensorChanged" }?.let { m ->
+                hook(m).intercept { chain ->
+                    val obj = chain.thisObject
+                    activeInstance = WeakReference(obj)
+                    val event = chain.args[0] as? SensorEvent
+                    if (event != null && event.values.isNotEmpty()) {
+                        currentAmbientLux = event.values[0]
+                    }
+                    if (isEnabled && isAdaptive) {
+                        patchInstance(obj)
+                        pushToDozeService(obj)
+                    }
+                    chain.proceed()
+                }
+                Log.i(TAG, "Hooked onSensorChanged")
+            }
+
+            systemUiHooked = true
+            Log.i(TAG, "Successfully installed all SystemUI hooks!")
+        } catch (t: Throwable) {
+            Log.e(TAG, "Error hooking SystemUI: ${t.message}", t)
+        }
+    }
+}
