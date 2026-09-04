@@ -18,6 +18,7 @@ class BrightnessProvider : ContentProvider() {
         const val PREF_NAME = "aod_prefs"
         const val KEY_ENABLED = "enabled"
         const val KEY_ADAPTIVE = "adaptive"
+        const val KEY_POCKET_MODE = "pocket_mode"
         const val KEY_MIN_BRIGHTNESS = "min_brightness"
         const val KEY_MAX_BRIGHTNESS = "max_brightness"
         const val KEY_CURVE = "curve"
@@ -37,6 +38,7 @@ class BrightnessProvider : ContentProvider() {
             return Bundle().apply {
                 putBoolean(KEY_ENABLED, prefs.getBoolean(KEY_ENABLED, true))
                 putBoolean(KEY_ADAPTIVE, prefs.getBoolean(KEY_ADAPTIVE, true))
+                putBoolean(KEY_POCKET_MODE, prefs.getBoolean(KEY_POCKET_MODE, true))
                 putInt(KEY_MIN_BRIGHTNESS, prefs.getInt(KEY_MIN_BRIGHTNESS, 1))
                 putInt(KEY_MAX_BRIGHTNESS, prefs.getInt(KEY_MAX_BRIGHTNESS, 40))
             }
@@ -52,6 +54,7 @@ class BrightnessProvider : ContentProvider() {
         val cursor = MatrixCursor(arrayOf("key", "value"))
         cursor.addRow(arrayOf(KEY_ENABLED, if (prefs.getBoolean(KEY_ENABLED, true)) 1 else 0))
         cursor.addRow(arrayOf(KEY_ADAPTIVE, if (prefs.getBoolean(KEY_ADAPTIVE, true)) 1 else 0))
+        cursor.addRow(arrayOf(KEY_POCKET_MODE, if (prefs.getBoolean(KEY_POCKET_MODE, true)) 1 else 0))
         cursor.addRow(arrayOf(KEY_MIN_BRIGHTNESS, prefs.getInt(KEY_MIN_BRIGHTNESS, 1)))
         cursor.addRow(arrayOf(KEY_MAX_BRIGHTNESS, prefs.getInt(KEY_MAX_BRIGHTNESS, 40)))
         return cursor
@@ -68,6 +71,9 @@ class BrightnessProvider : ContentProvider() {
             }
             if (values.containsKey(KEY_ADAPTIVE)) {
                 editor.putBoolean(KEY_ADAPTIVE, values.getAsBoolean(KEY_ADAPTIVE))
+            }
+            if (values.containsKey(KEY_POCKET_MODE)) {
+                editor.putBoolean(KEY_POCKET_MODE, values.getAsBoolean(KEY_POCKET_MODE))
             }
             if (values.containsKey(KEY_MIN_BRIGHTNESS)) {
                 editor.putInt(KEY_MIN_BRIGHTNESS, values.getAsInteger(KEY_MIN_BRIGHTNESS))

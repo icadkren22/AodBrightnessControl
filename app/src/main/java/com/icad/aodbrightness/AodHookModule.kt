@@ -31,23 +31,29 @@ class AodHookModule : XposedModule() {
 
         const val SETTING_ENABLED = "aod_brightness_enabled"
         const val SETTING_ADAPTIVE = "aod_brightness_adaptive"
+        const val SETTING_POCKET_MODE = "aod_brightness_pocket_mode"
         const val SETTING_MIN = "aod_brightness_min"
         const val SETTING_MAX = "aod_brightness_max"
         const val SETTING_CURVE = "aod_brightness_curve"
 
         @Volatile var isEnabled: Boolean = true
         @Volatile var isAdaptive: Boolean = false
+        @Volatile var isPocketMode: Boolean = true
         @Volatile var minBrightnessInt: Int = 30 // 1..255
         @Volatile var maxBrightnessInt: Int = 100 // 1..255
         @Volatile var curveGamma: Float = 1.3f // 0.5..2.5
         @Volatile var currentAmbientLux: Float = 0f
+        @Volatile var isNear: Boolean = false
+        @Volatile var inDoze: Boolean = false
 
         @Volatile private var activeInstance: WeakReference<Any>? = null
         @Volatile private var cachedSetDozeMethod: Method? = null
         @Volatile private var observerRegistered: Boolean = false
         @Volatile private var lightSensorRegistered: Boolean = false
+        @Volatile private var proximitySensorRegistered: Boolean = false
         @Volatile private var sensorManager: SensorManager? = null
         @Volatile private var lightSensor: Sensor? = null
+        @Volatile private var proximitySensor: Sensor? = null
 
         private val lightSensorListener = object : SensorEventListener {
             override fun onSensorChanged(event: SensorEvent?) {
@@ -57,7 +63,26 @@ class AodHookModule : XposedModule() {
                 if (abs(lux - currentAmbientLux) >= 1f) {
                     currentAmbientLux = lux
                     Log.d(TAG, "Light sensor event: lux=$lux")
-                    if (isEnabled && isAdaptive) {
+                    if (isEnabled && isAdaptive && !isNear) {
+                        applyBrightness()
+                    }
+                }
+            }
+
+            override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+        }
+
+        private val proximitySensorListener = object : SensorEventListener {
+            override fun onSensorChanged(event: SensorEvent?) {
+                if (event == null || event.values.isEmpty()) return
+                val distance = event.values[0]
+                val maxRange = proximitySensor?.maximumRange ?: 5f
+                val near = if (maxRange > 1.0f) distance < 1.0f else distance < maxRange
+                Log.d(TAG, "Proximity sensor event: distance=$distance (maxRange=$maxRange), near=$near")
+                if (near != isNear) {
+                    isNear = near
+                    Log.i(TAG, "Pocket mode state changed: isNear=$isNear")
+                    if (isEnabled && isPocketMode) {
                         applyBrightness()
                     }
                 }
@@ -67,10 +92,13 @@ class AodHookModule : XposedModule() {
         }
 
         fun targetBrightness(): Float {
+            if (isPocketMode && isNear) {
+                return 0.0f
+            }
             val lo = minBrightnessInt / 255.0f
             val hi = maxBrightnessInt / 255.0f
             return if (isAdaptive) {
-                // Smooth power curve (gamma 1.3) across 0..10000 lux:
+                // Smooth power curve across 0..10000 lux:
                 // - Pitch dark (0..50 lux): stays at pure min
                 // - Low/indoor light (500..900 lux): slightly brightens (~3-5% above min)
                 // - Window light (2000 lux): stays gentle (~12% above min)
@@ -114,7 +142,13 @@ class AodHookModule : XposedModule() {
                         ?.also { it.isAccessible = true }
                     cachedSetDozeMethod = method
                 }
-                method?.invoke(srv, t)
+                if (method != null) {
+                    if (method.parameterTypes[0] == Int::class.javaPrimitiveType || method.parameterTypes[0] == Integer::class.java) {
+                        method.invoke(srv, (t * 255f).toInt().coerceIn(0, 255))
+                    } else {
+                        method.invoke(srv, t)
+                    }
+                }
             } catch (t: Throwable) {
                 Log.w(TAG, "pushToDozeService failed: ${t.message}")
             }
@@ -125,24 +159,44 @@ class AodHookModule : XposedModule() {
             if (!isEnabled) return
             patchInstance(instance)
             pushToDozeService(instance)
-            Log.d(TAG, "applyBrightness: target=${targetBrightness()}, min=$minBrightnessInt, max=$maxBrightnessInt, lux=$currentAmbientLux")
+            Log.d(TAG, "applyBrightness: target=${targetBrightness()}, min=$minBrightnessInt, max=$maxBrightnessInt, lux=$currentAmbientLux, near=$isNear")
         }
 
         fun updateSensorRegistration() {
             val sm = sensorManager ?: return
-            val sensor = lightSensor ?: return
 
-            if (isEnabled && isAdaptive) {
+            // Light sensor: only while in doze, enabled, and adaptive
+            val shouldLightBeRegistered = inDoze && isEnabled && isAdaptive
+            if (shouldLightBeRegistered) {
                 if (!lightSensorRegistered) {
-                    val success = sm.registerListener(lightSensorListener, sensor, SensorManager.SENSOR_DELAY_NORMAL)
-                    lightSensorRegistered = success
-                    Log.i(TAG, "Registered light sensor listener: success=$success")
+                    lightSensor?.let {
+                        lightSensorRegistered = sm.registerListener(lightSensorListener, it, SensorManager.SENSOR_DELAY_NORMAL)
+                        Log.i(TAG, "Registered light sensor listener: success=$lightSensorRegistered")
+                    }
                 }
             } else {
                 if (lightSensorRegistered) {
                     sm.unregisterListener(lightSensorListener)
                     lightSensorRegistered = false
                     Log.i(TAG, "Unregistered light sensor listener")
+                }
+            }
+
+            // Proximity sensor: only while in doze, enabled, and pocket mode
+            val shouldProxBeRegistered = inDoze && isEnabled && isPocketMode
+            if (shouldProxBeRegistered) {
+                if (!proximitySensorRegistered) {
+                    proximitySensor?.let {
+                        proximitySensorRegistered = sm.registerListener(proximitySensorListener, it, SensorManager.SENSOR_DELAY_NORMAL)
+                        Log.i(TAG, "Registered proximity sensor listener: success=$proximitySensorRegistered")
+                    }
+                }
+            } else {
+                if (proximitySensorRegistered) {
+                    sm.unregisterListener(proximitySensorListener)
+                    proximitySensorRegistered = false
+                    isNear = false
+                    Log.i(TAG, "Unregistered proximity sensor listener")
                 }
             }
         }
@@ -152,10 +206,11 @@ class AodHookModule : XposedModule() {
                 val cr = context.contentResolver
                 isEnabled = Settings.System.getInt(cr, SETTING_ENABLED, 1) == 1
                 isAdaptive = Settings.System.getInt(cr, SETTING_ADAPTIVE, 0) == 1
+                isPocketMode = Settings.System.getInt(cr, SETTING_POCKET_MODE, 1) == 1
                 minBrightnessInt = Settings.System.getInt(cr, SETTING_MIN, 30)
                 maxBrightnessInt = Settings.System.getInt(cr, SETTING_MAX, 100)
                 curveGamma = Settings.System.getFloat(cr, SETTING_CURVE, 1.3f)
-                Log.i(TAG, "Loaded settings: enabled=$isEnabled, adaptive=$isAdaptive, min=$minBrightnessInt, max=$maxBrightnessInt, curve=$curveGamma")
+                Log.i(TAG, "Loaded settings: enabled=$isEnabled, adaptive=$isAdaptive, pocket=$isPocketMode, min=$minBrightnessInt, max=$maxBrightnessInt, curve=$curveGamma")
                 updateSensorRegistration()
             } catch (t: Throwable) {
                 Log.w(TAG, "loadSettings failed: ${t.message}")
@@ -171,7 +226,8 @@ class AodHookModule : XposedModule() {
                 val sm = context.getSystemService(Context.SENSOR_SERVICE) as? SensorManager
                 sensorManager = sm
                 lightSensor = sm?.getDefaultSensor(Sensor.TYPE_LIGHT)
-                Log.i(TAG, "Light sensor init: sensor=${lightSensor?.name}")
+                proximitySensor = sm?.getDefaultSensor(Sensor.TYPE_PROXIMITY)
+                Log.i(TAG, "Sensors init: light=${lightSensor?.name}, prox=${proximitySensor?.name}")
             } catch (t: Throwable) {
                 Log.e(TAG, "Failed initializing SensorManager: ${t.message}")
             }
@@ -190,7 +246,7 @@ class AodHookModule : XposedModule() {
             }
 
             val cr = context.contentResolver
-            for (key in listOf(SETTING_ENABLED, SETTING_ADAPTIVE, SETTING_MIN, SETTING_MAX, SETTING_CURVE)) {
+            for (key in listOf(SETTING_ENABLED, SETTING_ADAPTIVE, SETTING_POCKET_MODE, SETTING_MIN, SETTING_MAX, SETTING_CURVE)) {
                 try {
                     cr.registerContentObserver(Settings.System.getUriFor(key), false, observer)
                 } catch (t: Throwable) { }
@@ -202,10 +258,11 @@ class AodHookModule : XposedModule() {
                     if (intent == null) return
                     isEnabled = intent.getBooleanExtra(BrightnessProvider.KEY_ENABLED, isEnabled)
                     isAdaptive = intent.getBooleanExtra(BrightnessProvider.KEY_ADAPTIVE, isAdaptive)
+                    isPocketMode = intent.getBooleanExtra(BrightnessProvider.KEY_POCKET_MODE, isPocketMode)
                     minBrightnessInt = intent.getIntExtra(BrightnessProvider.KEY_MIN_BRIGHTNESS, minBrightnessInt)
                     maxBrightnessInt = intent.getIntExtra(BrightnessProvider.KEY_MAX_BRIGHTNESS, maxBrightnessInt)
                     curveGamma = intent.getFloatExtra(BrightnessProvider.KEY_CURVE, curveGamma)
-                    Log.d(TAG, "Broadcast received: min=$minBrightnessInt, max=$maxBrightnessInt, curve=$curveGamma, adaptive=$isAdaptive")
+                    Log.d(TAG, "Broadcast received: min=$minBrightnessInt, max=$maxBrightnessInt, curve=$curveGamma, adaptive=$isAdaptive, pocket=$isPocketMode")
                     updateSensorRegistration()
                     applyBrightness()
                 }
@@ -271,12 +328,12 @@ class AodHookModule : XposedModule() {
 
                     if (newState == "FINISH") {
                         // Turned screen back on / left doze
-                        if (lightSensorRegistered) {
-                            sensorManager?.unregisterListener(lightSensorListener)
-                            lightSensorRegistered = false
-                            Log.d(TAG, "Unregistered light sensor on FINISH")
-                        }
+                        inDoze = false
+                        isNear = false
+                        updateSensorRegistration()
+                        Log.d(TAG, "Unregistered sensors on FINISH")
                     } else if (newState.contains("DOZE")) {
+                        inDoze = true
                         updateSensorRegistration()
                     }
 
@@ -291,6 +348,10 @@ class AodHookModule : XposedModule() {
                 hook(m).intercept { chain ->
                     val obj = chain.thisObject
                     activeInstance = WeakReference(obj)
+                    if (!inDoze) {
+                        inDoze = true
+                        updateSensorRegistration()
+                    }
                     if (isEnabled) {
                         patchInstance(obj)
                         pushToDozeService(obj)

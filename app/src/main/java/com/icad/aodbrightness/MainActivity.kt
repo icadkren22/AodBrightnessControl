@@ -20,6 +20,7 @@ class MainActivity : AppCompatActivity() {
 
         val switchEnable = findViewById<MaterialSwitch>(R.id.switchEnable)
         val switchAdaptive = findViewById<MaterialSwitch>(R.id.switchAdaptive)
+        val switchPocketMode = findViewById<MaterialSwitch>(R.id.switchPocketMode)
         val sliderMin = findViewById<Slider>(R.id.sliderMin)
         val sliderMax = findViewById<Slider>(R.id.sliderMax)
         val sliderCurve = findViewById<Slider>(R.id.sliderCurve)
@@ -50,6 +51,12 @@ class MainActivity : AppCompatActivity() {
             prefs.getBoolean(BrightnessProvider.KEY_ADAPTIVE, false)
         }
 
+        val pocketMode = try {
+            android.provider.Settings.System.getInt(contentResolver, AodHookModule.SETTING_POCKET_MODE, 1) == 1
+        } catch (t: Throwable) {
+            prefs.getBoolean(BrightnessProvider.KEY_POCKET_MODE, true)
+        }
+
         val minBrightness = try {
             android.provider.Settings.System.getInt(contentResolver, AodHookModule.SETTING_MIN, 30)
         } catch (t: Throwable) {
@@ -70,6 +77,7 @@ class MainActivity : AppCompatActivity() {
 
         switchEnable.isChecked = enabled
         switchAdaptive.isChecked = adaptive
+        switchPocketMode.isChecked = pocketMode
         sliderMin.value = minBrightness.coerceIn(1, 255).toFloat()
         sliderMax.value = maxBrightness.coerceIn(1, 255).toFloat()
         sliderCurve.value = curve.coerceIn(0.5f, 2.5f)
@@ -85,6 +93,7 @@ class MainActivity : AppCompatActivity() {
                 setPackage("com.android.systemui")
                 putExtra(BrightnessProvider.KEY_ENABLED, switchEnable.isChecked)
                 putExtra(BrightnessProvider.KEY_ADAPTIVE, switchAdaptive.isChecked)
+                putExtra(BrightnessProvider.KEY_POCKET_MODE, switchPocketMode.isChecked)
                 putExtra(BrightnessProvider.KEY_MIN_BRIGHTNESS, sliderMin.value.toInt())
                 putExtra(BrightnessProvider.KEY_MAX_BRIGHTNESS, sliderMax.value.toInt())
                 putExtra(BrightnessProvider.KEY_CURVE, sliderCurve.value)
@@ -115,6 +124,7 @@ class MainActivity : AppCompatActivity() {
                 when (key) {
                     BrightnessProvider.KEY_ENABLED -> android.provider.Settings.System.putInt(contentResolver, AodHookModule.SETTING_ENABLED, if (value as Boolean) 1 else 0)
                     BrightnessProvider.KEY_ADAPTIVE -> android.provider.Settings.System.putInt(contentResolver, AodHookModule.SETTING_ADAPTIVE, if (value as Boolean) 1 else 0)
+                    BrightnessProvider.KEY_POCKET_MODE -> android.provider.Settings.System.putInt(contentResolver, AodHookModule.SETTING_POCKET_MODE, if (value as Boolean) 1 else 0)
                     BrightnessProvider.KEY_MIN_BRIGHTNESS -> android.provider.Settings.System.putInt(contentResolver, AodHookModule.SETTING_MIN, value as Int)
                     BrightnessProvider.KEY_MAX_BRIGHTNESS -> android.provider.Settings.System.putInt(contentResolver, AodHookModule.SETTING_MAX, value as Int)
                     BrightnessProvider.KEY_CURVE -> android.provider.Settings.System.putFloat(contentResolver, AodHookModule.SETTING_CURVE, value as Float)
@@ -136,6 +146,10 @@ class MainActivity : AppCompatActivity() {
             cardMax.visibility = v
             cardCurve.visibility = v
             updateSetting(BrightnessProvider.KEY_ADAPTIVE, isChecked)
+        }
+
+        switchPocketMode.setOnCheckedChangeListener { _, isChecked ->
+            updateSetting(BrightnessProvider.KEY_POCKET_MODE, isChecked)
         }
 
         sliderMin.addOnChangeListener { _, value, _ ->
