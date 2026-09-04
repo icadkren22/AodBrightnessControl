@@ -129,24 +129,51 @@ class AodHookModule : XposedModule() {
             }
         }
 
+        @Volatile private var cachedSetDozeStateMethod: Method? = null
+
+        fun getDozeService(obj: Any): Any? = runCatching {
+            obj.javaClass.getDeclaredField("mDozeService").apply { isAccessible = true }.get(obj)
+        }.getOrNull()
+
         fun pushToDozeService(obj: Any) {
             val t = targetBrightness()
             try {
-                val srvField = obj.javaClass.getDeclaredField("mDozeService").apply { isAccessible = true }
-                val srv = srvField.get(obj) ?: return
+                val srv = getDozeService(obj) ?: return
 
-                var method = cachedSetDozeMethod
-                if (method == null) {
-                    method = (srv.javaClass.methods + srv.javaClass.declaredMethods)
-                        .firstOrNull { it.name == "setDozeScreenBrightness" && it.parameterTypes.size == 1 }
+                // ── screen state ──────────────────────────────────────────────────────
+                // When pocketed we want Display.STATE_OFF (1) so OLED pixels truly go dark.
+                // When un-pocketed we restore Display.STATE_DOZE_SUSPEND (4) which is the
+                // normal always-on state.
+                // Display states: OFF=1, ON=2, DOZE=3, DOZE_SUSPEND=4, ON_SUSPEND=5
+                var stateMethod = cachedSetDozeStateMethod
+                if (stateMethod == null) {
+                    stateMethod = (srv.javaClass.methods + srv.javaClass.declaredMethods)
+                        .firstOrNull { it.name == "setDozeScreenState" && it.parameterTypes.size == 1 }
                         ?.also { it.isAccessible = true }
-                    cachedSetDozeMethod = method
+                    cachedSetDozeStateMethod = stateMethod
                 }
-                if (method != null) {
-                    if (method.parameterTypes[0] == Int::class.javaPrimitiveType || method.parameterTypes[0] == Integer::class.java) {
-                        method.invoke(srv, (t * 255f).toInt().coerceIn(0, 255))
-                    } else {
-                        method.invoke(srv, t)
+                if (stateMethod != null) {
+                    val displayState = if (isPocketMode && isNear) 1 else 4 // OFF=1, DOZE_SUSPEND=4
+                    Log.d(TAG, "setDozeScreenState($displayState) near=$isNear")
+                    stateMethod.invoke(srv, displayState)
+                }
+
+                // ── brightness ────────────────────────────────────────────────────────
+                // Only push brightness when the screen is actually visible
+                if (!isNear || !isPocketMode) {
+                    var method = cachedSetDozeMethod
+                    if (method == null) {
+                        method = (srv.javaClass.methods + srv.javaClass.declaredMethods)
+                            .firstOrNull { it.name == "setDozeScreenBrightness" && it.parameterTypes.size == 1 }
+                            ?.also { it.isAccessible = true }
+                        cachedSetDozeMethod = method
+                    }
+                    if (method != null) {
+                        if (method.parameterTypes[0] == Int::class.javaPrimitiveType || method.parameterTypes[0] == Integer::class.java) {
+                            method.invoke(srv, (t * 255f).toInt().coerceIn(1, 255))
+                        } else {
+                            method.invoke(srv, t)
+                        }
                     }
                 }
             } catch (t: Throwable) {
