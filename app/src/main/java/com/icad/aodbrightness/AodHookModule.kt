@@ -7,7 +7,6 @@ import android.content.IntentFilter
 import android.database.ContentObserver
 import android.hardware.Sensor
 import android.hardware.SensorEvent
-import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 import android.os.Build
 import android.os.Handler
@@ -19,9 +18,8 @@ import io.github.libxposed.api.XposedModuleInterface.PackageLoadedParam
 import io.github.libxposed.api.XposedModuleInterface.PackageReadyParam
 import java.lang.ref.WeakReference
 import java.lang.reflect.Method
+import java.util.Optional
 import kotlin.math.abs
-import kotlin.math.max
-import kotlin.math.min
 
 class AodHookModule : XposedModule() {
 
@@ -45,36 +43,11 @@ class AodHookModule : XposedModule() {
         @Volatile private var activeInstance: WeakReference<Any>? = null
         @Volatile private var cachedSetDozeMethod: Method? = null
         @Volatile private var observerRegistered: Boolean = false
-        @Volatile private var lightSensorRegistered: Boolean = false
-        @Volatile private var sensorManager: SensorManager? = null
-        @Volatile private var lightSensor: Sensor? = null
-
-        private val lightSensorListener = object : SensorEventListener {
-            override fun onSensorChanged(event: SensorEvent?) {
-                if (event == null || event.values.isEmpty()) return
-                val lux = event.values[0]
-                // Only update if change is significant (> 1 lux or > 5% difference)
-                if (abs(lux - currentAmbientLux) >= 1f) {
-                    currentAmbientLux = lux
-                    Log.d(TAG, "Light sensor event: lux=$lux")
-                    if (isEnabled && isAdaptive) {
-                        applyBrightness()
-                    }
-                }
-            }
-
-            override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
-        }
 
         fun targetBrightness(): Float {
             val lo = minBrightnessInt / 255.0f
             val hi = maxBrightnessInt / 255.0f
             return if (isAdaptive) {
-                // Smooth power curve (gamma 1.3) across 0..10000 lux:
-                // - Pitch dark (0..50 lux): stays at pure min
-                // - Low/indoor light (500..900 lux): slightly brightens (~3-5% above min)
-                // - Window light (2000 lux): stays gentle (~12% above min)
-                // - Outdoor daylight (5000..10000 lux): ramps smoothly to max
                 val normalizedLux = (currentAmbientLux / 10000.0f).coerceIn(0.0f, 1.0f)
                 val factor = Math.pow(normalizedLux.toDouble(), curveGamma.toDouble()).toFloat()
                 (lo + (hi - lo) * factor).coerceIn(0.001f, 1.0f)
@@ -83,21 +56,27 @@ class AodHookModule : XposedModule() {
             }
         }
 
-        fun patchInstance(obj: Any) {
-            val t = targetBrightness()
-            runCatching {
-                val defField = obj.javaClass.getDeclaredField("mDefaultDozeBrightness").apply { isAccessible = true }
-                defField.setFloat(obj, t)
-            }
-            runCatching {
-                val arr = obj.javaClass.getDeclaredField("mSensorToBrightness").apply { isAccessible = true }.get(obj) as? FloatArray
-                arr?.fill(t)
-            }
-            for (field in listOf("mSensorToScrimOpacity", "mSensorToWallpaperScrimOpacity")) {
-                runCatching {
-                    val arr = obj.javaClass.getDeclaredField(field).apply { isAccessible = true }.get(obj) as? IntArray
-                    arr?.fill(0)
+        @Suppress("UNCHECKED_CAST")
+        fun injectNativeSensor(obj: Any) {
+            try {
+                val optField = obj.javaClass.getDeclaredField("mLightSensorOptional").apply { isAccessible = true }
+                val current = optField.get(obj) as? Array<*>
+                val hasSensor = current != null && current.isNotEmpty() && (current[0] as? Optional<*>)?.isPresent == true
+                if (!hasSensor) {
+                    val smField = obj.javaClass.getDeclaredField("mSensorManager").apply { isAccessible = true }
+                    val sm = smField.get(obj) as? SensorManager
+                    val sensor = sm?.getDefaultSensor(Sensor.TYPE_LIGHT)
+                    if (sensor != null) {
+                        val array = java.lang.reflect.Array.newInstance(Optional::class.java, 5) as Array<Optional<Sensor>>
+                        for (i in array.indices) {
+                            array[i] = Optional.of(sensor)
+                        }
+                        optField.set(obj, array)
+                        Log.i(TAG, "Native Bridge: Injected sensor '${sensor.name}' into SystemUI mLightSensorOptional")
+                    }
                 }
+            } catch (t: Throwable) {
+                Log.e(TAG, "Native Bridge: Failed injecting sensor into mLightSensorOptional: ${t.message}", t)
             }
         }
 
@@ -123,27 +102,36 @@ class AodHookModule : XposedModule() {
         fun applyBrightness(obj: Any? = null) {
             val instance = obj ?: activeInstance?.get() ?: return
             if (!isEnabled) return
-            patchInstance(instance)
-            pushToDozeService(instance)
-            Log.d(TAG, "applyBrightness: target=${targetBrightness()}, min=$minBrightnessInt, max=$maxBrightnessInt, lux=$currentAmbientLux")
-        }
+            val target = targetBrightness()
 
-        fun updateSensorRegistration() {
-            val sm = sensorManager ?: return
-            val sensor = lightSensor ?: return
+            try {
+                val defField = instance.javaClass.getDeclaredField("mDefaultDozeBrightness").apply { isAccessible = true }
+                defField.setFloat(instance, target)
+            } catch (t: Throwable) { }
 
-            if (isEnabled && isAdaptive) {
-                if (!lightSensorRegistered) {
-                    val success = sm.registerListener(lightSensorListener, sensor, SensorManager.SENSOR_DELAY_NORMAL)
-                    lightSensorRegistered = success
-                    Log.i(TAG, "Registered light sensor listener: success=$success")
+            try {
+                val brtField = instance.javaClass.getDeclaredField("mSensorToBrightness").apply { isAccessible = true }
+                var arr = brtField.get(instance) as? FloatArray
+                if (arr == null || arr.isEmpty()) {
+                    arr = FloatArray(1)
+                    brtField.set(instance, arr)
                 }
-            } else {
-                if (lightSensorRegistered) {
-                    sm.unregisterListener(lightSensorListener)
-                    lightSensorRegistered = false
-                    Log.i(TAG, "Unregistered light sensor listener")
+                arr[0] = target
+            } catch (t: Throwable) { }
+
+            for (field in listOf("mSensorToScrimOpacity", "mSensorToWallpaperScrimOpacity")) {
+                runCatching {
+                    val arr = instance.javaClass.getDeclaredField(field).apply { isAccessible = true }.get(instance) as? IntArray
+                    arr?.fill(0)
                 }
+            }
+
+            try {
+                val method = instance.javaClass.getDeclaredMethod("updateBrightnessAndReady", Boolean::class.javaPrimitiveType).apply { isAccessible = true }
+                method.invoke(instance, true)
+                Log.d(TAG, "Native Bridge: Invoked native updateBrightnessAndReady(true) -> $target")
+            } catch (t: Throwable) {
+                pushToDozeService(instance)
             }
         }
 
@@ -156,7 +144,6 @@ class AodHookModule : XposedModule() {
                 maxBrightnessInt = Settings.System.getInt(cr, SETTING_MAX, 100)
                 curveGamma = Settings.System.getFloat(cr, SETTING_CURVE, 1.3f)
                 Log.i(TAG, "Loaded settings: enabled=$isEnabled, adaptive=$isAdaptive, min=$minBrightnessInt, max=$maxBrightnessInt, curve=$curveGamma")
-                updateSensorRegistration()
             } catch (t: Throwable) {
                 Log.w(TAG, "loadSettings failed: ${t.message}")
             }
@@ -165,16 +152,6 @@ class AodHookModule : XposedModule() {
         fun setupObserver(context: Context) {
             if (observerRegistered) return
             observerRegistered = true
-
-            // Initialize SensorManager
-            try {
-                val sm = context.getSystemService(Context.SENSOR_SERVICE) as? SensorManager
-                sensorManager = sm
-                lightSensor = sm?.getDefaultSensor(Sensor.TYPE_LIGHT)
-                Log.i(TAG, "Light sensor init: sensor=${lightSensor?.name}")
-            } catch (t: Throwable) {
-                Log.e(TAG, "Failed initializing SensorManager: ${t.message}")
-            }
 
             val handler = Handler(Looper.getMainLooper())
             val reloadRunnable = Runnable {
@@ -206,7 +183,6 @@ class AodHookModule : XposedModule() {
                     maxBrightnessInt = intent.getIntExtra(BrightnessProvider.KEY_MAX_BRIGHTNESS, maxBrightnessInt)
                     curveGamma = intent.getFloatExtra(BrightnessProvider.KEY_CURVE, curveGamma)
                     Log.d(TAG, "Broadcast received: min=$minBrightnessInt, max=$maxBrightnessInt, curve=$curveGamma, adaptive=$isAdaptive")
-                    updateSensorRegistration()
                     applyBrightness()
                 }
             }
@@ -221,8 +197,6 @@ class AodHookModule : XposedModule() {
             } catch (t: Throwable) {
                 Log.e(TAG, "Error registering receiver: ${t.message}", t)
             }
-
-            updateSensorRegistration()
         }
 
         fun appContext(): Context? = runCatching {
@@ -259,51 +233,92 @@ class AodHookModule : XposedModule() {
                 setupObserver(it)
             }
 
-            // 1. transitionTo - manage active instance and sensor lifecycle
+            // 1. Hook transitionTo: Inject native sensor and let SystemUI manage lifecycle
             clazz.declaredMethods.firstOrNull { it.name == "transitionTo" }?.let { m ->
                 hook(m).intercept { chain ->
                     val obj = chain.thisObject
                     activeInstance = WeakReference(obj)
                     appContext()?.let { setupObserver(it) }
 
+                    // Inject the hardware sensor into SystemUI's mLightSensorOptional array
+                    injectNativeSensor(obj)
+
                     val newState = chain.args[1]?.toString() ?: ""
                     Log.d(TAG, "transitionTo state: $newState")
 
-                    if (newState == "FINISH") {
-                        // Turned screen back on / left doze
-                        if (lightSensorRegistered) {
-                            sensorManager?.unregisterListener(lightSensorListener)
-                            lightSensorRegistered = false
-                            Log.d(TAG, "Unregistered light sensor on FINISH")
-                        }
-                    } else if (newState.contains("DOZE")) {
-                        updateSensorRegistration()
-                    }
+                    // Apply pre-transition brightness configuration
+                    val target = targetBrightness()
+                    try {
+                        val defField = obj.javaClass.getDeclaredField("mDefaultDozeBrightness").apply { isAccessible = true }
+                        defField.setFloat(obj, target)
+                    } catch (t: Throwable) { }
 
-                    patchInstance(obj)
+                    try {
+                        val brtField = obj.javaClass.getDeclaredField("mSensorToBrightness").apply { isAccessible = true }
+                        var arr = brtField.get(obj) as? FloatArray
+                        if (arr == null || arr.isEmpty()) {
+                            arr = FloatArray(1)
+                            brtField.set(obj, arr)
+                        }
+                        arr[0] = target
+                    } catch (t: Throwable) { }
+
+                    // Proceed with native transitionTo — SystemUI will natively call setLightSensorEnabled(true/false)
                     chain.proceed()
                 }
                 Log.i(TAG, "Hooked transitionTo")
             }
 
-            // 2. resetBrightnessToDefault - set target brightness directly
+            // 2. Hook onSensorChanged: SystemUI's native listener receives hardware events!
+            clazz.declaredMethods.firstOrNull { it.name == "onSensorChanged" }?.let { m ->
+                hook(m).intercept { chain ->
+                    val obj = chain.thisObject
+                    activeInstance = WeakReference(obj)
+                    val event = chain.args[0] as? SensorEvent
+                    if (event != null && event.values.isNotEmpty()) {
+                        val lux = event.values[0]
+                        if (abs(lux - currentAmbientLux) >= 1f) {
+                            currentAmbientLux = lux
+                            Log.d(TAG, "Native Bridge Sensor Event: lux=$lux")
+                        }
+
+                        val target = targetBrightness()
+                        try {
+                            val brtField = obj.javaClass.getDeclaredField("mSensorToBrightness").apply { isAccessible = true }
+                            var arr = brtField.get(obj) as? FloatArray
+                            if (arr == null || arr.isEmpty()) {
+                                arr = FloatArray(1)
+                                brtField.set(obj, arr)
+                            }
+                            arr[0] = target
+                        } catch (t: Throwable) { }
+
+                        // Point native computeBrightness to index 0
+                        event.values[0] = 0.0f
+                    }
+
+                    // Native DozeScreenBrightness.onSensorChanged -> updateBrightnessAndReady() runs!
+                    chain.proceed()
+                }
+                Log.i(TAG, "Hooked native onSensorChanged")
+            }
+
+            // 3. Hook resetBrightnessToDefault
             clazz.declaredMethods.firstOrNull { it.name == "resetBrightnessToDefault" }?.let { m ->
                 hook(m).intercept { chain ->
                     val obj = chain.thisObject
                     activeInstance = WeakReference(obj)
-                    if (isEnabled) {
-                        patchInstance(obj)
-                        pushToDozeService(obj)
-                        Log.d(TAG, "resetBrightnessToDefault applied target: ${targetBrightness()}")
-                        null
-                    } else {
-                        chain.proceed()
-                    }
+                    val target = targetBrightness()
+                    try {
+                        val defField = obj.javaClass.getDeclaredField("mDefaultDozeBrightness").apply { isAccessible = true }
+                        defField.setFloat(obj, target)
+                    } catch (t: Throwable) { }
+                    chain.proceed()
                 }
                 Log.i(TAG, "Hooked resetBrightnessToDefault")
             }
 
-            // 3. clampToDimBrightnessForScreenOff - override screen-off clamp with our target
+            // 4. Hook clampToDimBrightnessForScreenOff
             clazz.declaredMethods.firstOrNull { it.name == "clampToDimBrightnessForScreenOff" }?.let { m ->
                 hook(m).intercept { chain ->
                     if (isEnabled) targetBrightness() else chain.proceed()
@@ -311,26 +326,8 @@ class AodHookModule : XposedModule() {
                 Log.i(TAG, "Hooked clampToDimBrightnessForScreenOff")
             }
 
-            // 4. onSensorChanged (original method backup hook, if SystemUI ever fires it)
-            clazz.declaredMethods.firstOrNull { it.name == "onSensorChanged" }?.let { m ->
-                hook(m).intercept { chain ->
-                    val obj = chain.thisObject
-                    activeInstance = WeakReference(obj)
-                    val event = chain.args[0] as? SensorEvent
-                    if (event != null && event.values.isNotEmpty()) {
-                        currentAmbientLux = event.values[0]
-                    }
-                    if (isEnabled && isAdaptive) {
-                        patchInstance(obj)
-                        pushToDozeService(obj)
-                    }
-                    chain.proceed()
-                }
-                Log.i(TAG, "Hooked onSensorChanged")
-            }
-
             systemUiHooked = true
-            Log.i(TAG, "Successfully installed all SystemUI hooks!")
+            Log.i(TAG, "Successfully installed Native Bridge SystemUI hooks!")
         } catch (t: Throwable) {
             Log.e(TAG, "Error hooking SystemUI: ${t.message}", t)
         }
