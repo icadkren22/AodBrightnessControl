@@ -4,6 +4,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.res.Resources
 import android.database.ContentObserver
 import android.graphics.Bitmap
 import android.graphics.BitmapShader
@@ -23,6 +24,7 @@ import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
 import android.util.Log
+import android.view.View
 import io.github.libxposed.api.XposedModule
 import io.github.libxposed.api.XposedModuleInterface.PackageLoadedParam
 import io.github.libxposed.api.XposedModuleInterface.PackageReadyParam
@@ -61,6 +63,10 @@ class AodHookModule : XposedModule() {
 
         const val KEY_BLUR_MODE = "blur_mode"
         @Volatile var isAcrylicBlur: Boolean = false
+
+        // Unified 100% solid surface color for notification cards and Quick Settings
+        val SOLID_SURFACE_COLOR_INT: Int = Color.parseColor("#FF202328")
+        val SOLID_SURFACE_COLOR_LONG: Long = (Color.parseColor("#FF202328").toLong() and 0xFFFFFFFFL) shl 32
 
         fun checkAcrylicBlur() {
             try {
@@ -382,6 +388,53 @@ class AodHookModule : XposedModule() {
                 .getMethod("currentApplication")
                 .invoke(null) as? Context
         }.getOrNull()
+
+        @Volatile private var surfaceEffectIdSet: Set<Int>? = null
+
+        fun isSurfaceEffectResId(id: Int, res: Resources?): Boolean {
+            var set = surfaceEffectIdSet
+            if (set == null && res != null) {
+                val newSet = mutableSetOf<Int>()
+                for (name in listOf(
+                    "surface_effect_0",
+                    "surface_effect_1",
+                    "surface_effect_2",
+                    "surface_effect_3",
+                    "shade_panel_fg",
+                    "shade_panel_bg"
+                )) {
+                    val resId = try {
+                        res.getIdentifier(name, "color", "android")
+                    } catch (_: Throwable) { 0 }
+                    if (resId != 0) newSet.add(resId)
+                }
+                if (newSet.isNotEmpty()) {
+                    surfaceEffectIdSet = newSet
+                    set = newSet
+                    Log.i(TAG, "Resolved surface_effect color IDs: $newSet")
+                }
+            }
+            return set?.contains(id) == true
+        }
+
+        fun makeColorSchemeOpaque(scheme: Any) {
+            try {
+                val clazz = scheme.javaClass
+                for (field in clazz.declaredFields) {
+                    val name = field.name
+                    if (name.startsWith("surfaceEffect", ignoreCase = true) ||
+                        name.contains("shadeInactive", ignoreCase = true)) {
+                        field.isAccessible = true
+                        if (field.type == Long::class.javaPrimitiveType) {
+                            field.setLong(scheme, SOLID_SURFACE_COLOR_LONG)
+                            Log.i(TAG, "Made AndroidColorScheme.$name solid: 0x${java.lang.Long.toHexString(SOLID_SURFACE_COLOR_LONG)}")
+                        }
+                    }
+                }
+            } catch (t: Throwable) {
+                Log.e(TAG, "Error in makeColorSchemeOpaque: ${t.message}", t)
+            }
+        }
     }
 
     override fun onPackageLoaded(param: PackageLoadedParam) {
@@ -403,14 +456,33 @@ class AodHookModule : XposedModule() {
 
     private fun hookSystemUI(classLoader: ClassLoader) {
         if (systemUiHooked) return
+        checkAcrylicBlur()
         try {
-            val clazz = classLoader.loadClass("com.android.systemui.doze.DozeScreenBrightness")
-            Log.i(TAG, "Found DozeScreenBrightness class in SystemUI")
+            try {
+                val appClass = classLoader.loadClass("android.app.Application")
+                appClass.declaredMethods.firstOrNull { it.name == "onCreate" && it.parameterTypes.isEmpty() }?.let { m ->
+                    hook(m).intercept { chain ->
+                        chain.proceed()
+                        val ctx = chain.thisObject as? Context
+                        if (ctx != null) {
+                            loadSettings(ctx)
+                            setupObserver(ctx)
+                        }
+                        null
+                    }
+                    Log.i(TAG, "Hooked Application.onCreate in SystemUI")
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "Could not hook Application.onCreate: ${t.message}")
+            }
 
             appContext()?.let {
                 loadSettings(it)
                 setupObserver(it)
             }
+
+            val clazz = classLoader.loadClass("com.android.systemui.doze.DozeScreenBrightness")
+            Log.i(TAG, "Found DozeScreenBrightness class in SystemUI")
 
             // 1. transitionTo - manage active instance and sensor lifecycle
             clazz.declaredMethods.firstOrNull { it.name == "transitionTo" }?.let { m ->
@@ -491,28 +563,242 @@ class AodHookModule : XposedModule() {
                 val scrimClass = classLoader.loadClass("com.android.systemui.scrim.ScrimDrawable")
                 scrimClass.declaredMethods.firstOrNull { it.name == "draw" && it.parameterTypes.size == 1 }?.let { m ->
                     hook(m).intercept { chain ->
-                        chain.proceed()
-                        if (isAcrylicBlur) {
-                            val drawable = chain.thisObject as? Drawable ?: return@intercept null
-                            val canvas = chain.args[0] as? Canvas ?: return@intercept null
-                            val alpha = drawable.alpha
-                            if (alpha > 5) {
-                                val bounds = drawable.bounds
-                                val tint = FrostedGlassEffect.getTintPaint()
-                                tint.alpha = (alpha * 0.45f).toInt().coerceIn(0, 255)
-                                canvas.drawRect(bounds, tint)
+                        val drawable = chain.thisObject as? Drawable ?: return@intercept chain.proceed()
+                        val canvas = chain.args[0] as? Canvas ?: return@intercept chain.proceed()
+                        val alpha = drawable.alpha
 
-                                val noise = FrostedGlassEffect.getNoisePaint()
-                                noise.alpha = (alpha * 0.75f).toInt().coerceIn(0, 255)
-                                canvas.drawRect(bounds, noise)
+                        if (isAcrylicBlur) {
+                            val viewCallback = drawable.callback as? View
+                            val resName = try {
+                                if (viewCallback != null && viewCallback.id != View.NO_ID)
+                                    viewCallback.resources.getResourceEntryName(viewCallback.id)
+                                else null
+                            } catch (_: Throwable) { null }
+
+                            // Backdrop scrims: scrim_behind, scrim_notifications, etc.
+                            // Never apply to scrim_in_front (lockscreen / bouncer / power dialog)
+                            if (resName != "scrim_in_front") {
+                                if (alpha > 0) {
+                                    val bounds = drawable.bounds
+                                    val tint = FrostedGlassEffect.getTintPaint()
+                                    // Smoothly fade in acrylic tint with shade pull down,
+                                    // but cap alpha at ~130 (~50%) so wallpaper/apps ALWAYS remain visible!
+                                    tint.alpha = (alpha * 0.45f).toInt().coerceIn(0, 130)
+                                    canvas.drawRect(bounds, tint)
+
+                                    val noise = FrostedGlassEffect.getNoisePaint()
+                                    noise.alpha = (alpha * 0.70f).toInt().coerceIn(0, 175)
+                                    canvas.drawRect(bounds, noise)
+                                }
+                                // DO NOT call chain.proceed() for backdrop!
+                                // Original ScrimDrawable draws solid pitch black at alpha 255.
+                                return@intercept null
                             }
                         }
-                        null
+                        chain.proceed()
                     }
                     Log.i(TAG, "Hooked ScrimDrawable.draw for Frosted Glass Acrylic")
                 }
             } catch (t: Throwable) {
                 Log.w(TAG, "Could not hook ScrimDrawable: ${t.message}")
+            }
+
+            // 6. NotificationBackgroundView - ensure notification cards are 100% opaque
+            try {
+                val notifBgClass = classLoader.loadClass("com.android.systemui.statusbar.notification.row.NotificationBackgroundView")
+                val opaqueNotifPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    color = SOLID_SURFACE_COLOR_INT
+                    style = Paint.Style.FILL
+                }
+                notifBgClass.declaredMethods.firstOrNull { it.name == "onDraw" && it.parameterTypes.size == 1 }?.let { m ->
+                    hook(m).intercept { chain ->
+                        if (isAcrylicBlur) {
+                            val view = chain.thisObject as? View
+                            val canvas = chain.args[0] as? Canvas
+                            if (view != null && canvas != null && view.width > 0 && view.height > 0) {
+                                val r = 28f * view.resources.displayMetrics.density
+                                canvas.drawRoundRect(0f, 0f, view.width.toFloat(), view.height.toFloat(), r, r, opaqueNotifPaint)
+                            }
+                        }
+                        chain.proceed()
+                    }
+                    Log.i(TAG, "Hooked NotificationBackgroundView.onDraw for opacity")
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "Could not hook NotificationBackgroundView: ${t.message}")
+            }
+
+            // 7. QSTileViewImpl - ensure individual QS tiles are 100% opaque
+            try {
+                val qsTileViewClass = classLoader.loadClass("com.android.systemui.qs.tileimpl.QSTileViewImpl")
+                val tileBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    color = SOLID_SURFACE_COLOR_INT
+                    style = Paint.Style.FILL
+                }
+                // Hook onDraw to draw an opaque pill base under the tile
+                qsTileViewClass.declaredMethods.firstOrNull { it.name == "onDraw" && it.parameterTypes.size == 1 }?.let { m ->
+                    hook(m).intercept { chain ->
+                        if (isAcrylicBlur) {
+                            val view = chain.thisObject as? View
+                            val canvas = chain.args[0] as? Canvas
+                            if (view != null && canvas != null && view.width > 0 && view.height > 0) {
+                                val r = 24f * view.resources.displayMetrics.density
+                                canvas.drawRoundRect(0f, 0f, view.width.toFloat(), view.height.toFloat(), r, r, tileBgPaint)
+                            }
+                        }
+                        chain.proceed()
+                    }
+                    Log.i(TAG, "Hooked QSTileViewImpl.onDraw for opacity")
+                }
+
+                // Force 100% alpha on colors applied to tiles
+                qsTileViewClass.declaredMethods.firstOrNull { it.name == "setColor" && it.parameterTypes.size == 1 }?.let { m ->
+                    hook(m).intercept { chain ->
+                        if (isAcrylicBlur) {
+                            val color = (chain.args[0] as? Number)?.toInt() ?: 0
+                            if (color != 0) {
+                                chain.args[0] = color or (0xFF shl 24)
+                            }
+                        }
+                        chain.proceed()
+                    }
+                    Log.i(TAG, "Hooked QSTileViewImpl.setColor for opacity")
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "Could not hook QSTileViewImpl: ${t.message}")
+            }
+
+            // 8. BrightnessSliderView - ensure brightness slider track is 100% opaque
+            try {
+                val sliderViewClass = classLoader.loadClass("com.android.systemui.settings.brightness.BrightnessSliderView")
+                val sliderTrackPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    color = SOLID_SURFACE_COLOR_INT
+                    style = Paint.Style.FILL
+                }
+                val sliderField = runCatching {
+                    sliderViewClass.getDeclaredField("mSlider").apply { isAccessible = true }
+                }.getOrNull()
+
+                sliderViewClass.declaredMethods.firstOrNull { it.name == "dispatchDraw" && it.parameterTypes.size == 1 }?.let { m ->
+                    hook(m).intercept { chain ->
+                        if (isAcrylicBlur) {
+                            val view = chain.thisObject as? View
+                            val canvas = chain.args[0] as? Canvas
+                            if (view != null && canvas != null) {
+                                val slider = (sliderField?.get(view) as? View)
+                                    ?: runCatching {
+                                        val id = view.resources.getIdentifier("slider", "id", "com.android.systemui")
+                                        if (id != 0) view.findViewById<View>(id) else null
+                                    }.getOrNull()
+
+                                if (slider != null && slider.width > 0 && slider.height > 0) {
+                                    val r = slider.height / 2f
+                                    canvas.drawRoundRect(
+                                        slider.left.toFloat(),
+                                        slider.top.toFloat(),
+                                        slider.right.toFloat(),
+                                        slider.bottom.toFloat(),
+                                        r,
+                                        r,
+                                        sliderTrackPaint
+                                    )
+                                }
+                            }
+                        }
+                        chain.proceed()
+                    }
+                    Log.i(TAG, "Hooked BrightnessSliderView.dispatchDraw for opacity")
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "Could not hook BrightnessSliderView: ${t.message}")
+            }
+
+            // 9. SurfaceEffectColors - ensure surface effect colors return 100% alpha
+            try {
+                val secClass = classLoader.loadClass("com.android.systemui.common.shared.colors.SurfaceEffectColors")
+                for (m in secClass.declaredMethods) {
+                    if (m.name.startsWith("surfaceEffect") && m.returnType == Int::class.javaPrimitiveType) {
+                        hook(m).intercept { chain ->
+                            val orig = chain.proceed() as? Int ?: return@intercept null
+                            if (isAcrylicBlur) {
+                                SOLID_SURFACE_COLOR_INT
+                            } else {
+                                orig
+                            }
+                        }
+                        Log.i(TAG, "Hooked SurfaceEffectColors.${m.name}")
+                    }
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "Could not hook SurfaceEffectColors: ${t.message}")
+            }
+
+            // 10. AndroidColorScheme - ensure Compose Quick Settings tokens are 100% opaque
+            try {
+                val schemeClass = classLoader.loadClass("com.android.compose.theme.AndroidColorScheme")
+                val companionClass = runCatching {
+                    classLoader.loadClass("com.android.compose.theme.AndroidColorScheme\$Companion")
+                }.getOrNull()
+
+                val invokeMethods = (companionClass?.declaredMethods?.toList().orEmpty() + schemeClass.declaredMethods.toList())
+                    .filter { it.name == "invoke" && it.parameterTypes.size == 1 && Context::class.java.isAssignableFrom(it.parameterTypes[0]) }
+
+                for (m in invokeMethods) {
+                    hook(m).intercept { chain ->
+                        val scheme = chain.proceed()
+                        if (isAcrylicBlur && scheme != null) {
+                            makeColorSchemeOpaque(scheme)
+                        }
+                        scheme
+                    }
+                    Log.i(TAG, "Hooked AndroidColorScheme.invoke: ${m.declaringClass.name}.${m.name}")
+                }
+
+                // Also hook any getters on AndroidColorScheme returning Long
+                for (m in schemeClass.declaredMethods) {
+                    if (m.parameterTypes.isEmpty() && m.returnType == Long::class.javaPrimitiveType) {
+                        val name = m.name
+                        if (name.contains("surfaceEffect0", ignoreCase = true) ||
+                            name.contains("surfaceEffect1", ignoreCase = true) ||
+                            name.contains("shadeInactive", ignoreCase = true)) {
+                            hook(m).intercept { chain ->
+                                val orig = chain.proceed() as? Long ?: return@intercept null
+                                if (isAcrylicBlur) {
+                                    SOLID_SURFACE_COLOR_LONG
+                                } else {
+                                    orig
+                                }
+                            }
+                            Log.i(TAG, "Hooked AndroidColorScheme getter: ${m.name}")
+                        }
+                    }
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "Could not hook AndroidColorScheme: ${t.message}")
+            }
+
+            // 11. Resources.getColor - hook for surface_effect resources to ensure 100% alpha
+            try {
+                val resClass = classLoader.loadClass("android.content.res.Resources")
+                val getColorMethods = resClass.declaredMethods.filter {
+                    it.name == "getColor" && it.returnType == Int::class.javaPrimitiveType
+                }
+                for (m in getColorMethods) {
+                    hook(m).intercept { chain ->
+                        val orig = chain.proceed() as? Int ?: return@intercept null
+                        if (isAcrylicBlur && chain.args.isNotEmpty()) {
+                            val id = chain.args[0] as? Int ?: return@intercept orig
+                            val res = chain.thisObject as? Resources
+                            if (isSurfaceEffectResId(id, res)) {
+                                return@intercept SOLID_SURFACE_COLOR_INT
+                            }
+                        }
+                        orig
+                    }
+                    Log.i(TAG, "Hooked Resources.getColor: ${m.parameterTypes.joinToString { it.simpleName }}")
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "Could not hook Resources.getColor: ${t.message}")
             }
 
             systemUiHooked = true
