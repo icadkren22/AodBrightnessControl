@@ -24,6 +24,7 @@ class BrightnessProvider : ContentProvider() {
         const val KEY_CURVE = "curve"
         const val KEY_LUX_MIN = "lux_min"
         const val KEY_LUX_MAX = "lux_max"
+        const val KEY_DISABLE_AOD_BLUR = "disable_aod_blur"
 
         const val METHOD_GET_SETTINGS = "get_settings"
     }
@@ -46,6 +47,7 @@ class BrightnessProvider : ContentProvider() {
                 putFloat(KEY_CURVE, prefs.getFloat(KEY_CURVE, 1.3f))
                 putFloat(KEY_LUX_MIN, prefs.getFloat(KEY_LUX_MIN, 0f))
                 putFloat(KEY_LUX_MAX, prefs.getFloat(KEY_LUX_MAX, 20000f))
+                putBoolean(KEY_DISABLE_AOD_BLUR, prefs.getBoolean(KEY_DISABLE_AOD_BLUR, true))
             }
         }
         return super.call(method, arg, extras)
@@ -65,6 +67,7 @@ class BrightnessProvider : ContentProvider() {
         cursor.addRow(arrayOf(KEY_CURVE, prefs.getFloat(KEY_CURVE, 1.3f)))
         cursor.addRow(arrayOf(KEY_LUX_MIN, prefs.getFloat(KEY_LUX_MIN, 0f)))
         cursor.addRow(arrayOf(KEY_LUX_MAX, prefs.getFloat(KEY_LUX_MAX, 20000f)))
+        cursor.addRow(arrayOf(KEY_DISABLE_AOD_BLUR, if (prefs.getBoolean(KEY_DISABLE_AOD_BLUR, true)) 1 else 0))
         return cursor
     }
 
@@ -97,6 +100,9 @@ class BrightnessProvider : ContentProvider() {
             }
             if (values.containsKey(KEY_LUX_MAX)) {
                 editor.putFloat(KEY_LUX_MAX, values.getAsFloat(KEY_LUX_MAX))
+            }
+            if (values.containsKey(KEY_DISABLE_AOD_BLUR)) {
+                editor.putBoolean(KEY_DISABLE_AOD_BLUR, values.getAsBoolean(KEY_DISABLE_AOD_BLUR))
             }
             editor.apply()
             context?.contentResolver?.notifyChange(uri, null)

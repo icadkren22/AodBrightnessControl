@@ -34,6 +34,7 @@ class MainActivity : AppCompatActivity() {
         val etMaxLux = findViewById<com.google.android.material.textfield.TextInputEditText>(R.id.etMaxLux)
         val btnApplyLux = findViewById<MaterialButton>(R.id.btnApplyLux)
         val switchAcrylicBlur = findViewById<MaterialSwitch>(R.id.switchAcrylicBlur)
+        val switchDisableAodBlur = findViewById<MaterialSwitch>(R.id.switchDisableAodBlur)
         val btnTestScreenOff = findViewById<MaterialButton>(R.id.btnTestScreenOff)
 
         // Ensure Android system AOD/Doze is enabled
@@ -118,6 +119,13 @@ class MainActivity : AppCompatActivity() {
         }
         switchAcrylicBlur.isChecked = acrylicBlur
 
+        val disableAodBlur = try {
+            android.provider.Settings.System.getInt(contentResolver, AodHookModule.SETTING_DISABLE_AOD_BLUR, 1) == 1
+        } catch (t: Throwable) {
+            prefs.getBoolean(BrightnessProvider.KEY_DISABLE_AOD_BLUR, true)
+        }
+        switchDisableAodBlur.isChecked = disableAodBlur
+
         fun broadcastCurrentSettings() {
             val curMinLux = etMinLux.text?.toString()?.toFloatOrNull() ?: 0f
             val curMaxLux = etMaxLux.text?.toString()?.toFloatOrNull() ?: 20000f
@@ -131,6 +139,7 @@ class MainActivity : AppCompatActivity() {
                 putExtra(BrightnessProvider.KEY_CURVE, sliderCurve.value)
                 putExtra(BrightnessProvider.KEY_LUX_MIN, curMinLux)
                 putExtra(BrightnessProvider.KEY_LUX_MAX, curMaxLux)
+                putExtra(BrightnessProvider.KEY_DISABLE_AOD_BLUR, switchDisableAodBlur.isChecked)
                 putExtra(AodHookModule.KEY_BLUR_MODE, if (switchAcrylicBlur.isChecked) "acrylic" else "disabled")
             }
             sendBroadcast(intent)
@@ -165,6 +174,7 @@ class MainActivity : AppCompatActivity() {
                     BrightnessProvider.KEY_CURVE -> android.provider.Settings.System.putFloat(contentResolver, AodHookModule.SETTING_CURVE, value as Float)
                     BrightnessProvider.KEY_LUX_MIN -> android.provider.Settings.System.putFloat(contentResolver, AodHookModule.SETTING_LUX_MIN, value as Float)
                     BrightnessProvider.KEY_LUX_MAX -> android.provider.Settings.System.putFloat(contentResolver, AodHookModule.SETTING_LUX_MAX, value as Float)
+                    BrightnessProvider.KEY_DISABLE_AOD_BLUR -> android.provider.Settings.System.putInt(contentResolver, AodHookModule.SETTING_DISABLE_AOD_BLUR, if (value as Boolean) 1 else 0)
                 }
             } catch (t: Throwable) { }
 
@@ -255,6 +265,10 @@ class MainActivity : AppCompatActivity() {
                 } catch (t2: Throwable) { }
             }
             broadcastCurrentSettings()
+        }
+
+        switchDisableAodBlur.setOnCheckedChangeListener { _, isChecked ->
+            updateSetting(BrightnessProvider.KEY_DISABLE_AOD_BLUR, isChecked)
         }
 
         if (android.provider.Settings.System.getString(contentResolver, AodHookModule.SETTING_LUX_MIN) == null) {

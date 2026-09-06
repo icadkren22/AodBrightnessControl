@@ -48,10 +48,12 @@ class AodHookModule : XposedModule() {
         const val SETTING_CURVE = "aod_brightness_curve"
         const val SETTING_LUX_MIN = "aod_brightness_lux_min"
         const val SETTING_LUX_MAX = "aod_brightness_lux_max"
+        const val SETTING_DISABLE_AOD_BLUR = "aod_disable_blur"
 
         @Volatile var isEnabled: Boolean = true
         @Volatile var isAdaptive: Boolean = false
         @Volatile var isPocketMode: Boolean = true
+        @Volatile var isDisableAodBlur: Boolean = true
         @Volatile var minBrightnessInt: Int = 10 // 1..255
         @Volatile var maxBrightnessInt: Int = 160 // 1..255
         @Volatile var curveGamma: Float = 1.3f // 0.5..2.5
@@ -302,8 +304,9 @@ class AodHookModule : XposedModule() {
                 curveGamma = Settings.System.getFloat(cr, SETTING_CURVE, 1.3f)
                 minLuxCutoff = Settings.System.getFloat(cr, SETTING_LUX_MIN, 0f)
                 maxLuxCutoff = Settings.System.getFloat(cr, SETTING_LUX_MAX, 20000f)
+                isDisableAodBlur = Settings.System.getInt(cr, SETTING_DISABLE_AOD_BLUR, 1) == 1
                 checkAcrylicBlur()
-                Log.i(TAG, "Loaded settings: enabled=$isEnabled, adaptive=$isAdaptive, pocket=$isPocketMode, min=$minBrightnessInt, max=$maxBrightnessInt, curve=$curveGamma, luxMin=$minLuxCutoff, luxMax=$maxLuxCutoff, acrylic=$isAcrylicBlur")
+                Log.i(TAG, "Loaded settings: enabled=$isEnabled, adaptive=$isAdaptive, pocket=$isPocketMode, min=$minBrightnessInt, max=$maxBrightnessInt, curve=$curveGamma, luxMin=$minLuxCutoff, luxMax=$maxLuxCutoff, disableAodBlur=$isDisableAodBlur, acrylic=$isAcrylicBlur")
                 updateSensorRegistration()
             } catch (t: Throwable) {
                 Log.w(TAG, "loadSettings failed: ${t.message}")
@@ -339,7 +342,7 @@ class AodHookModule : XposedModule() {
             }
 
             val cr = context.contentResolver
-            for (key in listOf(SETTING_ENABLED, SETTING_ADAPTIVE, SETTING_POCKET_MODE, SETTING_MIN, SETTING_MAX, SETTING_CURVE, SETTING_LUX_MIN, SETTING_LUX_MAX)) {
+            for (key in listOf(SETTING_ENABLED, SETTING_ADAPTIVE, SETTING_POCKET_MODE, SETTING_MIN, SETTING_MAX, SETTING_CURVE, SETTING_LUX_MIN, SETTING_LUX_MAX, SETTING_DISABLE_AOD_BLUR)) {
                 try {
                     cr.registerContentObserver(Settings.System.getUriFor(key), false, observer)
                 } catch (t: Throwable) { }
@@ -357,13 +360,14 @@ class AodHookModule : XposedModule() {
                     curveGamma = intent.getFloatExtra(BrightnessProvider.KEY_CURVE, curveGamma)
                     minLuxCutoff = intent.getFloatExtra(BrightnessProvider.KEY_LUX_MIN, minLuxCutoff)
                     maxLuxCutoff = intent.getFloatExtra(BrightnessProvider.KEY_LUX_MAX, maxLuxCutoff)
+                    isDisableAodBlur = intent.getBooleanExtra(BrightnessProvider.KEY_DISABLE_AOD_BLUR, isDisableAodBlur)
                     if (intent.hasExtra(KEY_BLUR_MODE)) {
                         val mode = intent.getStringExtra(KEY_BLUR_MODE)
                         isAcrylicBlur = (mode == "acrylic")
                     } else {
                         checkAcrylicBlur()
                     }
-                    Log.d(TAG, "Broadcast received: min=$minBrightnessInt, max=$maxBrightnessInt, curve=$curveGamma, adaptive=$isAdaptive, pocket=$isPocketMode, luxCutoff=[$minLuxCutoff..$maxLuxCutoff], acrylic=$isAcrylicBlur")
+                    Log.d(TAG, "Broadcast received: min=$minBrightnessInt, max=$maxBrightnessInt, curve=$curveGamma, adaptive=$isAdaptive, pocket=$isPocketMode, luxCutoff=[$minLuxCutoff..$maxLuxCutoff], disableAodBlur=$isDisableAodBlur, acrylic=$isAcrylicBlur")
                     updateSensorRegistration()
                     applyBrightness()
                 }
@@ -657,7 +661,7 @@ class AodHookModule : XposedModule() {
                         if (isAcrylicBlur) {
                             val color = (chain.args[0] as? Number)?.toInt() ?: 0
                             if (color != 0) {
-                                chain.args[0] = color or (0xFF shl 24)
+                                return@intercept chain.proceed(arrayOf(color or (0xFF shl 24)))
                             }
                         }
                         chain.proceed()
@@ -799,6 +803,35 @@ class AodHookModule : XposedModule() {
                 }
             } catch (t: Throwable) {
                 Log.w(TAG, "Could not hook Resources.getColor: ${t.message}")
+            }
+
+            // 12. NotificationShadeDepthController - Disable AOD Wallpaper Blur
+            try {
+                val depthControllerClass = classLoader.loadClass("com.android.systemui.statusbar.NotificationShadeDepthController")
+                val blurMethods = (depthControllerClass.declaredMethods + depthControllerClass.methods)
+                    .distinct()
+                    .filter {
+                        it.name == "setWakeAndUnlockBlurRadius" ||
+                        it.name == "updateWakeBlurRadius" ||
+                        it.name == "getWakeAndUnlockBlurRadius"
+                    }
+                for (m in blurMethods) {
+                    m.isAccessible = true
+                    hook(m).intercept { chain ->
+                        if (isDisableAodBlur) {
+                            if (m.name == "getWakeAndUnlockBlurRadius") {
+                                return@intercept 0f
+                            }
+                            if (chain.args.isNotEmpty() && chain.args[0] is Number) {
+                                return@intercept chain.proceed(arrayOf(0f))
+                            }
+                        }
+                        chain.proceed()
+                    }
+                    Log.i(TAG, "Hooked NotificationShadeDepthController.${m.name}")
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "Could not hook NotificationShadeDepthController: ${t.message}")
             }
 
             systemUiHooked = true
