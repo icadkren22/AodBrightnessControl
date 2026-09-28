@@ -3,5 +3,7 @@
     <string-array name="xposed_scope">
         <item>com.android.systemui</item>
         <item>me.phh.treble.app</item>
+        <item>com.android.phone</item>
+        <item>org.codeaurora.ims</item>
     </string-array>
 </resources>

@@ -453,6 +453,10 @@ class AodHookModule : XposedModule() {
             hookSystemUI(param.classLoader)
         } else if (param.packageName == "me.phh.treble.app") {
             hookTrebleApp(param.classLoader)
+        } else if (param.packageName == "com.android.phone") {
+            hookPhone(param.classLoader)
+        } else if (param.packageName == "org.codeaurora.ims") {
+            hookIms(param.classLoader)
         }
     }
 
@@ -880,6 +884,231 @@ class AodHookModule : XposedModule() {
             }
         } catch (t: Throwable) {
             Log.w(TAG, "Could not hook TrebleApp: ${t.message}")
+        }
+    }
+
+    private var phoneHooked = false
+
+    private fun hookPhone(classLoader: ClassLoader) {
+        if (phoneHooked) return
+        try {
+            Log.i(TAG, "hookPhone: starting telephony hooks in com.android.phone")
+
+            // 1. Hook ImsPhoneMmiCode.isUssdOverImsAllowed() -> always return true
+            try {
+                val mmiClass = classLoader.loadClass("com.android.internal.telephony.imsphone.ImsPhoneMmiCode")
+                val isUssdMethod = mmiClass.declaredMethods.firstOrNull { it.name == "isUssdOverImsAllowed" }
+                if (isUssdMethod != null) {
+                    isUssdMethod.isAccessible = true
+                    hook(isUssdMethod).intercept { chain ->
+                        Log.i(TAG, "ImsPhoneMmiCode.isUssdOverImsAllowed() called -> forcing true (USSD over VoLTE IMS)")
+                        true
+                    }
+                    Log.i(TAG, "Successfully hooked ImsPhoneMmiCode.isUssdOverImsAllowed")
+                } else {
+                    Log.w(TAG, "Could not find isUssdOverImsAllowed in ImsPhoneMmiCode")
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "Could not hook ImsPhoneMmiCode: ${t.message}")
+            }
+
+            // 2. Hook CarrierConfigLoader -> force USSD_OVER_IMS_PREFERRED only on full configs
+            try {
+                val loaderClass = classLoader.loadClass("com.android.phone.CarrierConfigLoader")
+                val configMethods = loaderClass.declaredMethods.filter {
+                    (it.name.startsWith("getConfigForSubId") && !it.name.contains("Subset")) || it.name == "getDefaultConfig"
+                }
+                for (m in configMethods) {
+                    m.isAccessible = true
+                    hook(m).intercept { chain ->
+                        val res = chain.proceed() as? android.os.PersistableBundle
+                        if (res != null && res.size() > 10) {
+                            res.putInt("carrier_ussd_method_int", 1) // USSD_OVER_IMS_PREFERRED
+                            res.putBoolean("carrier_supports_ss_over_ut_bool", true)
+                            res.putBoolean("carrier_volte_available_bool", true)
+                        }
+                        res
+                    }
+                    Log.i(TAG, "Successfully hooked CarrierConfigLoader.${m.name}")
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "Could not hook CarrierConfigLoader: ${t.message}")
+            }
+
+            // 3. Hook CarrierConfigManager -> force USSD_OVER_IMS_PREFERRED only on full configs
+            try {
+                val ccmClass = classLoader.loadClass("android.telephony.CarrierConfigManager")
+                val getCfgMethods = ccmClass.declaredMethods.filter {
+                    it.name == "getConfigForSubId" && !it.name.contains("Subset")
+                }
+                for (m in getCfgMethods) {
+                    m.isAccessible = true
+                    hook(m).intercept { chain ->
+                        val res = chain.proceed() as? android.os.PersistableBundle
+                        if (res != null && res.size() > 10) {
+                            res.putInt("carrier_ussd_method_int", 1) // USSD_OVER_IMS_PREFERRED
+                            res.putBoolean("carrier_supports_ss_over_ut_bool", true)
+                            res.putBoolean("carrier_volte_available_bool", true)
+                        }
+                        res
+                    }
+                    Log.i(TAG, "Successfully hooked CarrierConfigManager.${m.name}")
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "Could not hook CarrierConfigManager: ${t.message}")
+            }
+
+            // 4. Hook ImsPhoneMmiCode.sendUssd -> let it proceed through ImsPhoneCallTracker to Qualcomm IMS
+            try {
+                val mmiClass = classLoader.loadClass("com.android.internal.telephony.imsphone.ImsPhoneMmiCode")
+                val sendUssdMethod = mmiClass.declaredMethods.firstOrNull { it.name == "sendUssd" && it.parameterTypes.size == 1 }
+                if (sendUssdMethod != null) {
+                    sendUssdMethod.isAccessible = true
+                    hook(sendUssdMethod).intercept { chain ->
+                        val mmiInstance = chain.thisObject
+                        val ussdMsg = chain.args[0] as? String ?: ""
+                        Log.i(TAG, "ImsPhoneMmiCode.sendUssd intercepted for code: $ussdMsg! Running independent USSI SIP client...")
+
+                        val phoneContext = runCatching {
+                            val phoneField = mmiInstance.javaClass.getDeclaredField("mPhone").apply { isAccessible = true }
+                            val phoneObj = phoneField.get(mmiInstance)
+                            phoneObj?.javaClass?.getMethod("getContext")?.invoke(phoneObj) as? Context
+                        }.getOrNull() ?: appContext()
+
+                        Thread {
+                            val sipResult = UssiSipClient.queryUssd(ussdMsg, phoneContext, classLoader)
+                            val displayText = if (!sipResult.isNullOrEmpty()) {
+                                sipResult
+                            } else {
+                                "No response from IMS core for $ussdMsg"
+                            }
+                            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                                try {
+                                    val onFinished = mmiClass.declaredMethods.firstOrNull {
+                                        it.name == "onUssdFinished" && it.parameterTypes.size == 2
+                                    }
+                                    if (onFinished != null) {
+                                        onFinished.isAccessible = true
+                                        Log.i(TAG, "Invoking onUssdFinished with: $displayText")
+                                        onFinished.invoke(mmiInstance, displayText, true)
+                                    }
+                                } catch (t: Throwable) {
+                                    Log.e(TAG, "Error invoking onUssdFinished: ${t.message}", t)
+                                }
+                            }
+                        }.start()
+
+                        null
+                    }
+                    Log.i(TAG, "Successfully hooked ImsPhoneMmiCode.sendUssd!")
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "Could not hook ImsPhoneMmiCode.sendUssd: ${t.message}")
+            }
+
+            phoneHooked = true
+            Log.i(TAG, "Successfully installed safe com.android.phone hooks!")
+        } catch (t: Throwable) {
+            Log.e(TAG, "Error hooking com.android.phone: ${t.message}", t)
+        }
+    }
+
+    private var imsHooked = false
+
+    private fun hookIms(classLoader: ClassLoader) {
+        if (imsHooked) return
+        try {
+            Log.i(TAG, "hookIms: starting hooks in org.codeaurora.ims")
+
+            // 1. Hook CapabilityTracker.isUssdSupported() -> always return true
+            try {
+                val capClass = classLoader.loadClass("org.codeaurora.ims.CapabilityTracker")
+                capClass.declaredMethods.firstOrNull { it.name == "isUssdSupported" }?.let { m ->
+                    m.isAccessible = true
+                    hook(m).intercept {
+                        Log.d(TAG, "CapabilityTracker.isUssdSupported -> true")
+                        true
+                    }
+                    Log.i(TAG, "Successfully hooked CapabilityTracker.isUssdSupported -> true")
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "Could not hook CapabilityTracker: ${t.message}")
+            }
+
+            // 2. Hook ImsServiceClassTracker.isUssdSupported() -> always return true
+            try {
+                val trackerClass = classLoader.loadClass("org.codeaurora.ims.ImsServiceClassTracker")
+                trackerClass.declaredMethods.firstOrNull { it.name == "isUssdSupported" }?.let { m ->
+                    m.isAccessible = true
+                    hook(m).intercept {
+                        Log.d(TAG, "ImsServiceClassTracker.isUssdSupported -> true")
+                        true
+                    }
+                    Log.i(TAG, "Successfully hooked ImsServiceClassTracker.isUssdSupported -> true")
+                }
+                trackerClass.declaredMethods.firstOrNull { it.name == "createUssdSession" }?.let { m ->
+                    m.isAccessible = true
+                    hook(m).intercept { chain ->
+                        Log.i(TAG, "ImsServiceClassTracker.createUssdSession called with args: ${chain.args.joinToString()}")
+                        chain.proceed()
+                    }
+                    Log.i(TAG, "Successfully hooked ImsServiceClassTracker.createUssdSession")
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "Could not hook ImsServiceClassTracker: ${t.message}")
+            }
+
+            // 3. Hook ImsServiceSub.isUssdSupported() -> always return true
+            try {
+                val subClass = classLoader.loadClass("org.codeaurora.ims.ImsServiceSub")
+                subClass.declaredMethods.firstOrNull { it.name == "isUssdSupported" }?.let { m ->
+                    m.isAccessible = true
+                    hook(m).intercept {
+                        Log.d(TAG, "ImsServiceSub.isUssdSupported -> true")
+                        true
+                    }
+                    Log.i(TAG, "Successfully hooked ImsServiceSub.isUssdSupported -> true")
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "Could not hook ImsServiceSub: ${t.message}")
+            }
+
+            // 4. Hook ImsSenderRxr for sendUssd and onUssdReceived
+            try {
+                val rxrClass = classLoader.loadClass("org.codeaurora.ims.ImsSenderRxr")
+                rxrClass.declaredMethods.firstOrNull { it.name == "sendUssd" }?.let { m ->
+                    m.isAccessible = true
+                    hook(m).intercept { chain ->
+                        Log.i(TAG, "ImsSenderRxr.sendUssd called! args: ${chain.args.joinToString()}")
+                        chain.proceed()
+                    }
+                    Log.i(TAG, "Successfully hooked ImsSenderRxr.sendUssd")
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "Could not hook ImsSenderRxr.sendUssd: ${t.message}")
+            }
+
+            // 5. Hook ImsUssdSessionImpl
+            try {
+                val ussdSessionClass = classLoader.loadClass("org.codeaurora.ims.ImsUssdSessionImpl")
+                for (m in ussdSessionClass.declaredMethods) {
+                    if (m.name == "sendUssd" || m.name.contains("Ussd", ignoreCase = true)) {
+                        m.isAccessible = true
+                        hook(m).intercept { chain ->
+                            Log.i(TAG, "ImsUssdSessionImpl.${m.name} called! args: ${chain.args.joinToString()}")
+                            chain.proceed()
+                        }
+                    }
+                }
+                Log.i(TAG, "Successfully hooked ImsUssdSessionImpl methods")
+            } catch (t: Throwable) {
+                Log.w(TAG, "Could not hook ImsUssdSessionImpl: ${t.message}")
+            }
+
+            imsHooked = true
+            Log.i(TAG, "Successfully installed all org.codeaurora.ims hooks!")
+        } catch (t: Throwable) {
+            Log.e(TAG, "Error hooking org.codeaurora.ims: ${t.message}", t)
         }
     }
 }
