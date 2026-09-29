@@ -154,7 +154,7 @@
                             android:id="@+id/tvMinVal"
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
-                            android:text="10 / 255"
+                            android:text="2 / 255"
                             android:textColor="?attr/colorPrimary"
                             android:textStyle="bold" />
                     </LinearLayout>
@@ -174,7 +174,7 @@
                         android:valueFrom="1"
                         android:valueTo="255"
                         android:stepSize="1"
-                        android:value="10" />
+                        android:value="2" />
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
 
@@ -210,7 +210,7 @@
                             android:id="@+id/tvMaxVal"
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
-                            android:text="160 / 255"
+                            android:text="48 / 255"
                             android:textColor="?attr/colorPrimary"
                             android:textStyle="bold" />
                     </LinearLayout>
@@ -230,7 +230,7 @@
                         android:valueFrom="1"
                         android:valueTo="255"
                         android:stepSize="1"
-                        android:value="160" />
+                        android:value="48" />
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
 

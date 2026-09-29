@@ -37,6 +37,7 @@
             android:name=".BrightnessProvider"
             android:authorities="com.icad.aodbrightness.provider"
             android:exported="true"
+            android:directBootAware="true"
             android:multiprocess="false" />
     </application>
 

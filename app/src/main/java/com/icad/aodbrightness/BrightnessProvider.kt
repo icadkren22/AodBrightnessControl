@@ -27,10 +27,26 @@ class BrightnessProvider : ContentProvider() {
         const val KEY_DISABLE_AOD_BLUR = "disable_aod_blur"
 
         const val METHOD_GET_SETTINGS = "get_settings"
+
+        const val DEFAULT_MIN_BRIGHTNESS = 2
+        const val DEFAULT_MAX_BRIGHTNESS = 48
+
+        fun getPreferences(context: Context): SharedPreferences {
+            val targetContext = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
+                val deContext = context.createDeviceProtectedStorageContext()
+                try {
+                    deContext.moveSharedPreferencesFrom(context, PREF_NAME)
+                } catch (_: Throwable) { }
+                deContext
+            } else {
+                context
+            }
+            return targetContext.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+        }
     }
 
     private fun getPrefs(): SharedPreferences {
-        return context!!.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+        return getPreferences(context!!)
     }
 
     override fun onCreate(): Boolean = true
@@ -40,10 +56,10 @@ class BrightnessProvider : ContentProvider() {
             val prefs = getPrefs()
             return Bundle().apply {
                 putBoolean(KEY_ENABLED, prefs.getBoolean(KEY_ENABLED, true))
-                putBoolean(KEY_ADAPTIVE, prefs.getBoolean(KEY_ADAPTIVE, true))
+                putBoolean(KEY_ADAPTIVE, prefs.getBoolean(KEY_ADAPTIVE, false))
                 putBoolean(KEY_POCKET_MODE, prefs.getBoolean(KEY_POCKET_MODE, true))
-                putInt(KEY_MIN_BRIGHTNESS, prefs.getInt(KEY_MIN_BRIGHTNESS, 10))
-                putInt(KEY_MAX_BRIGHTNESS, prefs.getInt(KEY_MAX_BRIGHTNESS, 160))
+                putInt(KEY_MIN_BRIGHTNESS, prefs.getInt(KEY_MIN_BRIGHTNESS, DEFAULT_MIN_BRIGHTNESS))
+                putInt(KEY_MAX_BRIGHTNESS, prefs.getInt(KEY_MAX_BRIGHTNESS, DEFAULT_MAX_BRIGHTNESS))
                 putFloat(KEY_CURVE, prefs.getFloat(KEY_CURVE, 1.3f))
                 putFloat(KEY_LUX_MIN, prefs.getFloat(KEY_LUX_MIN, 0f))
                 putFloat(KEY_LUX_MAX, prefs.getFloat(KEY_LUX_MAX, 20000f))
@@ -60,10 +76,10 @@ class BrightnessProvider : ContentProvider() {
         val prefs = getPrefs()
         val cursor = MatrixCursor(arrayOf("key", "value"))
         cursor.addRow(arrayOf(KEY_ENABLED, if (prefs.getBoolean(KEY_ENABLED, true)) 1 else 0))
-        cursor.addRow(arrayOf(KEY_ADAPTIVE, if (prefs.getBoolean(KEY_ADAPTIVE, true)) 1 else 0))
+        cursor.addRow(arrayOf(KEY_ADAPTIVE, if (prefs.getBoolean(KEY_ADAPTIVE, false)) 1 else 0))
         cursor.addRow(arrayOf(KEY_POCKET_MODE, if (prefs.getBoolean(KEY_POCKET_MODE, true)) 1 else 0))
-        cursor.addRow(arrayOf(KEY_MIN_BRIGHTNESS, prefs.getInt(KEY_MIN_BRIGHTNESS, 10)))
-        cursor.addRow(arrayOf(KEY_MAX_BRIGHTNESS, prefs.getInt(KEY_MAX_BRIGHTNESS, 160)))
+        cursor.addRow(arrayOf(KEY_MIN_BRIGHTNESS, prefs.getInt(KEY_MIN_BRIGHTNESS, DEFAULT_MIN_BRIGHTNESS)))
+        cursor.addRow(arrayOf(KEY_MAX_BRIGHTNESS, prefs.getInt(KEY_MAX_BRIGHTNESS, DEFAULT_MAX_BRIGHTNESS)))
         cursor.addRow(arrayOf(KEY_CURVE, prefs.getFloat(KEY_CURVE, 1.3f)))
         cursor.addRow(arrayOf(KEY_LUX_MIN, prefs.getFloat(KEY_LUX_MIN, 0f)))
         cursor.addRow(arrayOf(KEY_LUX_MAX, prefs.getFloat(KEY_LUX_MAX, 20000f)))

@@ -43,55 +43,16 @@ class MainActivity : AppCompatActivity() {
             android.provider.Settings.Secure.putInt(contentResolver, "doze_always_on", 1)
         } catch (t: Throwable) { }
 
-        val prefs = getSharedPreferences(BrightnessProvider.PREF_NAME, Context.MODE_PRIVATE)
+        val prefs = BrightnessProvider.getPreferences(this)
 
-        val enabled = try {
-            android.provider.Settings.System.getInt(contentResolver, AodHookModule.SETTING_ENABLED, 1) == 1
-        } catch (t: Throwable) {
-            prefs.getBoolean(BrightnessProvider.KEY_ENABLED, true)
-        }
-
-        val adaptive = try {
-            android.provider.Settings.System.getInt(contentResolver, AodHookModule.SETTING_ADAPTIVE, 0) == 1
-        } catch (t: Throwable) {
-            prefs.getBoolean(BrightnessProvider.KEY_ADAPTIVE, false)
-        }
-
-        val pocketMode = try {
-            android.provider.Settings.System.getInt(contentResolver, AodHookModule.SETTING_POCKET_MODE, 1) == 1
-        } catch (t: Throwable) {
-            prefs.getBoolean(BrightnessProvider.KEY_POCKET_MODE, true)
-        }
-
-        val minBrightness = try {
-            android.provider.Settings.System.getInt(contentResolver, AodHookModule.SETTING_MIN, 10)
-        } catch (t: Throwable) {
-            prefs.getInt(BrightnessProvider.KEY_MIN_BRIGHTNESS, 10)
-        }
-
-        val maxBrightness = try {
-            android.provider.Settings.System.getInt(contentResolver, AodHookModule.SETTING_MAX, 160)
-        } catch (t: Throwable) {
-            prefs.getInt(BrightnessProvider.KEY_MAX_BRIGHTNESS, 160)
-        }
-
-        val curve = try {
-            android.provider.Settings.System.getFloat(contentResolver, AodHookModule.SETTING_CURVE, 1.3f)
-        } catch (t: Throwable) {
-            prefs.getFloat(BrightnessProvider.KEY_CURVE, 1.3f)
-        }
-
-        val minLux = try {
-            android.provider.Settings.System.getFloat(contentResolver, AodHookModule.SETTING_LUX_MIN, 0f)
-        } catch (t: Throwable) {
-            prefs.getFloat(BrightnessProvider.KEY_LUX_MIN, 0f)
-        }
-
-        val maxLux = try {
-            android.provider.Settings.System.getFloat(contentResolver, AodHookModule.SETTING_LUX_MAX, 20000f)
-        } catch (t: Throwable) {
-            prefs.getFloat(BrightnessProvider.KEY_LUX_MAX, 20000f)
-        }
+        val enabled = prefs.getBoolean(BrightnessProvider.KEY_ENABLED, true)
+        val adaptive = prefs.getBoolean(BrightnessProvider.KEY_ADAPTIVE, false)
+        val pocketMode = prefs.getBoolean(BrightnessProvider.KEY_POCKET_MODE, true)
+        val minBrightness = prefs.getInt(BrightnessProvider.KEY_MIN_BRIGHTNESS, BrightnessProvider.DEFAULT_MIN_BRIGHTNESS)
+        val maxBrightness = prefs.getInt(BrightnessProvider.KEY_MAX_BRIGHTNESS, BrightnessProvider.DEFAULT_MAX_BRIGHTNESS)
+        val curve = prefs.getFloat(BrightnessProvider.KEY_CURVE, 1.3f)
+        val minLux = prefs.getFloat(BrightnessProvider.KEY_LUX_MIN, 0f)
+        val maxLux = prefs.getFloat(BrightnessProvider.KEY_LUX_MAX, 20000f)
 
         switchEnable.isChecked = enabled
         switchAdaptive.isChecked = adaptive
@@ -271,11 +232,6 @@ class MainActivity : AppCompatActivity() {
             updateSetting(BrightnessProvider.KEY_DISABLE_AOD_BLUR, isChecked)
         }
 
-        if (android.provider.Settings.System.getString(contentResolver, AodHookModule.SETTING_LUX_MIN) == null) {
-            updateSetting(BrightnessProvider.KEY_LUX_MIN, minLux)
-            updateSetting(BrightnessProvider.KEY_LUX_MAX, maxLux)
-        } else {
-            broadcastCurrentSettings()
-        }
+        broadcastCurrentSettings()
     }
 }

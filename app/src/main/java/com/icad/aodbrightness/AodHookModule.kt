@@ -50,12 +50,15 @@ class AodHookModule : XposedModule() {
         const val SETTING_LUX_MAX = "aod_brightness_lux_max"
         const val SETTING_DISABLE_AOD_BLUR = "aod_disable_blur"
 
+        const val DEFAULT_MIN_BRIGHTNESS = 2
+        const val DEFAULT_MAX_BRIGHTNESS = 48
+
         @Volatile var isEnabled: Boolean = true
         @Volatile var isAdaptive: Boolean = false
         @Volatile var isPocketMode: Boolean = true
         @Volatile var isDisableAodBlur: Boolean = true
-        @Volatile var minBrightnessInt: Int = 10 // 1..255
-        @Volatile var maxBrightnessInt: Int = 160 // 1..255
+        @Volatile var minBrightnessInt: Int = DEFAULT_MIN_BRIGHTNESS // 1..255
+        @Volatile var maxBrightnessInt: Int = DEFAULT_MAX_BRIGHTNESS // 1..255
         @Volatile var curveGamma: Float = 1.3f // 0.5..2.5
         @Volatile var minLuxCutoff: Float = 0f
         @Volatile var maxLuxCutoff: Float = 20000f
@@ -296,17 +299,40 @@ class AodHookModule : XposedModule() {
         fun loadSettings(context: Context) {
             try {
                 val cr = context.contentResolver
-                isEnabled = Settings.System.getInt(cr, SETTING_ENABLED, 1) == 1
-                isAdaptive = Settings.System.getInt(cr, SETTING_ADAPTIVE, 0) == 1
-                isPocketMode = Settings.System.getInt(cr, SETTING_POCKET_MODE, 1) == 1
-                minBrightnessInt = Settings.System.getInt(cr, SETTING_MIN, 10)
-                maxBrightnessInt = Settings.System.getInt(cr, SETTING_MAX, 160)
-                curveGamma = Settings.System.getFloat(cr, SETTING_CURVE, 1.3f)
-                minLuxCutoff = Settings.System.getFloat(cr, SETTING_LUX_MIN, 0f)
-                maxLuxCutoff = Settings.System.getFloat(cr, SETTING_LUX_MAX, 20000f)
-                isDisableAodBlur = Settings.System.getInt(cr, SETTING_DISABLE_AOD_BLUR, 1) == 1
+                var loadedFromProvider = false
+                try {
+                    val bundle = cr.call(BrightnessProvider.CONTENT_URI, BrightnessProvider.METHOD_GET_SETTINGS, null, null)
+                    if (bundle != null) {
+                        isEnabled = bundle.getBoolean(BrightnessProvider.KEY_ENABLED, true)
+                        isAdaptive = bundle.getBoolean(BrightnessProvider.KEY_ADAPTIVE, false)
+                        isPocketMode = bundle.getBoolean(BrightnessProvider.KEY_POCKET_MODE, true)
+                        minBrightnessInt = bundle.getInt(BrightnessProvider.KEY_MIN_BRIGHTNESS, DEFAULT_MIN_BRIGHTNESS)
+                        maxBrightnessInt = bundle.getInt(BrightnessProvider.KEY_MAX_BRIGHTNESS, DEFAULT_MAX_BRIGHTNESS)
+                        curveGamma = bundle.getFloat(BrightnessProvider.KEY_CURVE, 1.3f)
+                        minLuxCutoff = bundle.getFloat(BrightnessProvider.KEY_LUX_MIN, 0f)
+                        maxLuxCutoff = bundle.getFloat(BrightnessProvider.KEY_LUX_MAX, 20000f)
+                        isDisableAodBlur = bundle.getBoolean(BrightnessProvider.KEY_DISABLE_AOD_BLUR, true)
+                        loadedFromProvider = true
+                        Log.i(TAG, "Loaded settings from BrightnessProvider: enabled=$isEnabled, adaptive=$isAdaptive, pocket=$isPocketMode, min=$minBrightnessInt, max=$maxBrightnessInt, curve=$curveGamma, luxMin=$minLuxCutoff, luxMax=$maxLuxCutoff, disableAodBlur=$isDisableAodBlur")
+                    }
+                } catch (t: Throwable) {
+                    Log.w(TAG, "Could not load settings from BrightnessProvider: ${t.message}")
+                }
+
+                if (!loadedFromProvider) {
+                    isEnabled = Settings.System.getInt(cr, SETTING_ENABLED, if (isEnabled) 1 else 0) == 1
+                    isAdaptive = Settings.System.getInt(cr, SETTING_ADAPTIVE, if (isAdaptive) 1 else 0) == 1
+                    isPocketMode = Settings.System.getInt(cr, SETTING_POCKET_MODE, if (isPocketMode) 1 else 0) == 1
+                    minBrightnessInt = Settings.System.getInt(cr, SETTING_MIN, minBrightnessInt)
+                    maxBrightnessInt = Settings.System.getInt(cr, SETTING_MAX, maxBrightnessInt)
+                    curveGamma = Settings.System.getFloat(cr, SETTING_CURVE, curveGamma)
+                    minLuxCutoff = Settings.System.getFloat(cr, SETTING_LUX_MIN, minLuxCutoff)
+                    maxLuxCutoff = Settings.System.getFloat(cr, SETTING_LUX_MAX, maxLuxCutoff)
+                    isDisableAodBlur = Settings.System.getInt(cr, SETTING_DISABLE_AOD_BLUR, if (isDisableAodBlur) 1 else 0) == 1
+                }
+
                 checkAcrylicBlur()
-                Log.i(TAG, "Loaded settings: enabled=$isEnabled, adaptive=$isAdaptive, pocket=$isPocketMode, min=$minBrightnessInt, max=$maxBrightnessInt, curve=$curveGamma, luxMin=$minLuxCutoff, luxMax=$maxLuxCutoff, disableAodBlur=$isDisableAodBlur, acrylic=$isAcrylicBlur")
+                Log.i(TAG, "Effective settings: enabled=$isEnabled, adaptive=$isAdaptive, pocket=$isPocketMode, min=$minBrightnessInt, max=$maxBrightnessInt, curve=$curveGamma, luxMin=$minLuxCutoff, luxMax=$maxLuxCutoff, disableAodBlur=$isDisableAodBlur, acrylic=$isAcrylicBlur")
                 updateSensorRegistration()
             } catch (t: Throwable) {
                 Log.w(TAG, "loadSettings failed: ${t.message}")
@@ -342,6 +368,11 @@ class AodHookModule : XposedModule() {
             }
 
             val cr = context.contentResolver
+            try {
+                cr.registerContentObserver(BrightnessProvider.CONTENT_URI, true, observer)
+            } catch (t: Throwable) {
+                Log.w(TAG, "Failed registering BrightnessProvider observer: ${t.message}")
+            }
             for (key in listOf(SETTING_ENABLED, SETTING_ADAPTIVE, SETTING_POCKET_MODE, SETTING_MIN, SETTING_MAX, SETTING_CURVE, SETTING_LUX_MIN, SETTING_LUX_MAX, SETTING_DISABLE_AOD_BLUR)) {
                 try {
                     cr.registerContentObserver(Settings.System.getUriFor(key), false, observer)
